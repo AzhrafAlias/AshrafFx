@@ -1,0 +1,333 @@
+//@version=5
+indicator("BBMA OMA Ally - Single Any alert() Flow", overlay=true, max_labels_count=500)
+
+//====================================================
+// 0) Helper: symbol detection
+//====================================================
+sym = str.upper(syminfo.ticker)
+isGOLD = str.contains(sym, "GOLD") or str.contains(sym, "XAU")
+isGJ = str.contains(sym, "GBPJPY") or (str.contains(sym, "GBP") and str.contains(sym, "JPY"))
+isGU = str.contains(sym, "GBPUSD") or (str.contains(sym, "GBP") and str.contains(sym, "USD"))
+isGA = str.contains(sym, "GBPAUD") or (str.contains(sym, "GBP") and str.contains(sym, "AUD"))
+isEJ = str.contains(sym, "EURJPY") or (str.contains(sym, "EUR") and str.contains(sym, "JPY"))
+
+//====================================================
+// 1) Inputs
+//====================================================
+useAutoProfile = input.bool(true, "Auto-switch settings by symbol (recommended)")
+bbLen = input.int(20, "BB Period", minval=5)
+bbDev = input.float(2.0, "BB Deviation", minval=0.5, step=0.1)
+atrLen = input.int(14, "ATR Length", minval=5)
+useH1FilterTF = input.bool(true, "Use H1 Filter for TF")
+useH1FilterREV = input.bool(true, "Use H1 Filter for REV")
+useBarCloseConfirm = input.bool(false, "Confirm on bar close (OFF = faster TF2 REV alert)")
+reLookbackBars = input.int(10, "REENTRY: Momentum lookback bars", minval=1)
+reBlockWhenBBFlat = input.bool(true, "REENTRY: Block when BB flat (recommended)")
+reUseMA = input.string("MA10", "REENTRY: Touch MA", options=["MA5","MA10"])
+flatLookbackBars_manual = input.int(20, "BB Flat (manual): width avg lookback", minval=5)
+flatSlopeATR_manual = input.float(0.30, "BB Flat (manual): MidBB slope per bar <= ATR*x", minval=0.01, step=0.01)
+flatWidthATR_manual = input.float(3.0, "BB Flat (manual): Bandwidth <= ATR*x", minval=0.1, step=0.1)
+useWidthStable = input.bool(true, "BB Flat: require width not expanding fast")
+widthStablePct_manual = input.float(1.15, "BB Flat (manual): width <= avgWidth * factor", minval=1.0, step=0.05)
+useMA5or10ForREV = input.string("MA5 OR MA10", "REV trigger MA", options=["MA10 only","MA5 only","MA5 OR MA10"])
+revRequireCloseBackInsideBB = input.bool(true, "REV: require close back inside BB")
+revRequireCandleColor = input.bool(true, "REV: candle direction (buy green / sell red)")
+revRequireWickOnly = input.bool(true, "REV: require WICK-only pierce outer BB (no body outside)")
+tf2WindowBars = input.int(12, "TF2 REV confirm window after TF1 RE", minval=1, maxval=50)
+showLegacyTFRE = input.bool(true, "Show TF1 RE labels")
+showCurrentTFREV = input.bool(true, "Show current TF REV labels")
+showDebugTf2Rev = input.bool(true, "Show TF2 REV debug marks")
+showStatusTable = input.bool(true, "Show status table")
+sendAlerts = input.bool(true, "Send alerts via alert()")
+alertOncePerBar = input.bool(true, "Alert once per bar")
+alertRE = input.bool(true, "Alert RE BUY / RE SELL")
+alertREV = input.bool(true, "Alert REV BUY / REV SELL")
+alertNOW = input.bool(true, "Alert BUY NOW / SELL NOW")
+
+//====================================================
+// 2) Auto profile table
+//====================================================
+flatSlopeATR_auto = isGOLD ? 0.40 : isGJ ? 0.40 : isGU ? 0.30 : isGA ? 0.25 : isEJ ? 0.35 : 0.30
+flatWidthATR_auto = isGOLD ? 4.5 : isGJ ? 4.0 : isGU ? 3.0 : isGA ? 2.6 : isEJ ? 3.5 : 3.0
+widthStablePct_auto = isGOLD ? 1.20 : isGJ ? 1.20 : isGU ? 1.15 : isGA ? 1.12 : isEJ ? 1.18 : 1.15
+flatLookbackBars_auto = 20
+
+flatLookbackBars = useAutoProfile ? flatLookbackBars_auto : flatLookbackBars_manual
+flatSlopeATR = useAutoProfile ? flatSlopeATR_auto : flatSlopeATR_manual
+flatWidthATR = useAutoProfile ? flatWidthATR_auto : flatWidthATR_manual
+widthStablePct = useAutoProfile ? widthStablePct_auto : widthStablePct_manual
+
+//====================================================
+// 3) Auto TF mapping
+//====================================================
+tf1 = timeframe.period
+tf2 = timeframe.period == "240" ? "60" : timeframe.period == "60" ? "15" : timeframe.period == "15" ? "5" : timeframe.period == "5" ? "1" : "15"
+
+//====================================================
+// 4) Indicators
+//====================================================
+midBB = ta.sma(close, bbLen)
+dev = bbDev * ta.stdev(close, bbLen)
+upper = midBB + dev
+lower = midBB - dev
+ema50 = ta.ema(close, 50)
+ma5H = ta.wma(high, 5)
+ma10H = ta.wma(high, 10)
+ma5L = ta.wma(low, 5)
+ma10L = ta.wma(low, 10)
+atr = ta.atr(atrLen)
+
+//====================================================
+// 5) H1 filter
+//====================================================
+h1Close = request.security(syminfo.tickerid, "60", close)
+h1EMA50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+h1MidBB = request.security(syminfo.tickerid, "60", ta.sma(close, bbLen))
+h1Bull = h1Close > h1EMA50 and h1Close > h1MidBB
+h1Bear = h1Close < h1EMA50 and h1Close < h1MidBB
+allowBuyTF = not useH1FilterTF or h1Bull
+allowSellTF = not useH1FilterTF or h1Bear
+allowBuyREV = not useH1FilterREV or h1Bull
+allowSellREV = not useH1FilterREV or h1Bear
+
+//====================================================
+// 6) BB Flat detection
+//====================================================
+midSlopePerBar = math.abs(midBB - midBB[1])
+bbWidth = upper - lower
+avgWidth = ta.sma(bbWidth, flatLookbackBars)
+widthStableOK = not useWidthStable or (bbWidth <= avgWidth * widthStablePct)
+bbFlat = (midSlopePerBar <= atr * flatSlopeATR) and (bbWidth <= atr * flatWidthATR) and widthStableOK
+
+//====================================================
+// 7) Candle direction + body bounds
+//====================================================
+isBull = close > open
+isBear = close < open
+bodyHigh = math.max(open, close)
+bodyLow = math.min(open, close)
+
+//====================================================
+// 8) TF1 Momentum logic (for RE lookback only)
+//====================================================
+tfMomBuy = allowBuyTF and close > upper and isBull
+tfMomSell = allowSellTF and close < lower and isBear
+
+//====================================================
+// 9) TF1 Reentry logic
+//====================================================
+reMA_L = reUseMA == "MA5" ? ma5L : ma10L
+reMA_H = reUseMA == "MA5" ? ma5H : ma10H
+momBuyRecent = ta.barssince(tfMomBuy) > 0 and ta.barssince(tfMomBuy) <= reLookbackBars
+momSellRecent = ta.barssince(tfMomSell) > 0 and ta.barssince(tfMomSell) <= reLookbackBars
+reAllowed = not reBlockWhenBBFlat or not bbFlat
+reBuyRaw = allowBuyTF and reAllowed and momBuyRecent and (low <= reMA_L) and (close > reMA_L) and isBull
+reSellRaw = allowSellTF and reAllowed and momSellRecent and (high >= reMA_H) and (close < reMA_H) and isBear
+reBuy = useBarCloseConfirm ? (reBuyRaw and barstate.isconfirmed) : reBuyRaw
+reSell = useBarCloseConfirm ? (reSellRaw and barstate.isconfirmed) : reSellRaw
+newReBuy = reBuy and not reBuy[1]
+newReSell = reSell and not reSell[1]
+
+//====================================================
+// 10) TF2 REV function
+//====================================================
+f_rev_buy_tf2() =>
+    _midBB = ta.sma(close, bbLen)
+    _dev = bbDev * ta.stdev(close, bbLen)
+    _upper = _midBB + _dev
+    _lower = _midBB - _dev
+    _ma5L = ta.wma(low, 5)
+    _ma10L = ta.wma(low, 10)
+    _atr = ta.atr(atrLen)
+    _midSlopePerBar = math.abs(_midBB - _midBB[1])
+    _bbWidth = _upper - _lower
+    _avgWidth = ta.sma(_bbWidth, flatLookbackBars)
+    _widthStableOK = not useWidthStable or (_bbWidth <= _avgWidth * widthStablePct)
+    _bbFlat = (_midSlopePerBar <= _atr * flatSlopeATR) and (_bbWidth <= _atr * flatWidthATR) and _widthStableOK
+    _isBull = close > open
+    _bodyLow = math.min(open, close)
+    _h1Close = request.security(syminfo.tickerid, "60", close)
+    _h1EMA50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+    _h1MidBB = request.security(syminfo.tickerid, "60", ta.sma(close, bbLen))
+    _h1Bull = _h1Close > _h1EMA50 and _h1Close > _h1MidBB
+    _allowBuyREV = not useH1FilterREV or _h1Bull
+    _maLoOut10 = _ma10L < _lower
+    _maLoOut5 = _ma5L < _lower
+    _maLoOut = useMA5or10ForREV == "MA10 only" ? _maLoOut10 : useMA5or10ForREV == "MA5 only" ? _maLoOut5 : (_maLoOut5 or _maLoOut10)
+    _revBuyWickOnly = (low < _lower) and (_bodyLow >= _lower)
+    _wickOnlyBuyOK = not revRequireWickOnly or _revBuyWickOnly
+    _revBuyTrig = _allowBuyREV and _bbFlat and _maLoOut and _wickOnlyBuyOK
+    _revBuyInsideOK = not revRequireCloseBackInsideBB or (close > _lower)
+    _revBuyColorOK = not revRequireCandleColor or _isBull
+    _revBuyRaw = _revBuyTrig and _revBuyInsideOK and _revBuyColorOK
+    useBarCloseConfirm ? (_revBuyRaw and barstate.isconfirmed) : _revBuyRaw
+
+f_rev_sell_tf2() =>
+    _midBB = ta.sma(close, bbLen)
+    _dev = bbDev * ta.stdev(close, bbLen)
+    _upper = _midBB + _dev
+    _lower = _midBB - _dev
+    _ma5H = ta.wma(high, 5)
+    _ma10H = ta.wma(high, 10)
+    _atr = ta.atr(atrLen)
+    _midSlopePerBar = math.abs(_midBB - _midBB[1])
+    _bbWidth = _upper - _lower
+    _avgWidth = ta.sma(_bbWidth, flatLookbackBars)
+    _widthStableOK = not useWidthStable or (_bbWidth <= _avgWidth * widthStablePct)
+    _bbFlat = (_midSlopePerBar <= _atr * flatSlopeATR) and (_bbWidth <= _atr * flatWidthATR) and _widthStableOK
+    _isBear = close < open
+    _bodyHigh = math.max(open, close)
+    _h1Close = request.security(syminfo.tickerid, "60", close)
+    _h1EMA50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+    _h1MidBB = request.security(syminfo.tickerid, "60", ta.sma(close, bbLen))
+    _h1Bear = _h1Close < _h1EMA50 and _h1Close < _h1MidBB
+    _allowSellREV = not useH1FilterREV or _h1Bear
+    _maHiOut10 = _ma10H > _upper
+    _maHiOut5 = _ma5H > _upper
+    _maHiOut = useMA5or10ForREV == "MA10 only" ? _maHiOut10 : useMA5or10ForREV == "MA5 only" ? _maHiOut5 : (_maHiOut5 or _maHiOut10)
+    _revSellWickOnly = (high > _upper) and (_bodyHigh <= _upper)
+    _wickOnlySellOK = not revRequireWickOnly or _revSellWickOnly
+    _revSellTrig = _allowSellREV and _bbFlat and _maHiOut and _wickOnlySellOK
+    _revSellInsideOK = not revRequireCloseBackInsideBB or (close < _upper)
+    _revSellColorOK = not revRequireCandleColor or _isBear
+    _revSellRaw = _revSellTrig and _revSellInsideOK and _revSellColorOK
+    useBarCloseConfirm ? (_revSellRaw and barstate.isconfirmed) : _revSellRaw
+
+//====================================================
+// 11) TF2 REV fetch
+//====================================================
+tf2RevBuySig = request.security(syminfo.tickerid, tf2, f_rev_buy_tf2() ? 1 : 0, barmerge.gaps_off, barmerge.lookahead_off)
+tf2RevSellSig = request.security(syminfo.tickerid, tf2, f_rev_sell_tf2() ? 1 : 0, barmerge.gaps_off, barmerge.lookahead_off)
+tf2RevBuyTime = request.security(syminfo.tickerid, tf2, f_rev_buy_tf2() ? time : na, barmerge.gaps_off, barmerge.lookahead_off)
+tf2RevSellTime = request.security(syminfo.tickerid, tf2, f_rev_sell_tf2() ? time : na, barmerge.gaps_off, barmerge.lookahead_off)
+newTf2RevBuy = tf2RevBuySig == 1 and tf2RevBuySig[1] == 0
+newTf2RevSell = tf2RevSellSig == 1 and tf2RevSellSig[1] == 0
+
+//====================================================
+// 12) Current TF REV display
+//====================================================
+maHiOut10 = ma10H > upper
+maLoOut10 = ma10L < lower
+maHiOut5 = ma5H > upper
+maLoOut5 = ma5L < lower
+maHiOut = useMA5or10ForREV == "MA10 only" ? maHiOut10 : useMA5or10ForREV == "MA5 only" ? maHiOut5 : (maHiOut5 or maHiOut10)
+maLoOut = useMA5or10ForREV == "MA10 only" ? maLoOut10 : useMA5or10ForREV == "MA5 only" ? maLoOut5 : (maLoOut5 or maLoOut10)
+revBuyWickOnly = (low < lower) and (bodyLow >= lower)
+revSellWickOnly = (high > upper) and (bodyHigh <= upper)
+wickOnlyBuyOK = not revRequireWickOnly or revBuyWickOnly
+wickOnlySellOK = not revRequireWickOnly or revSellWickOnly
+revBuyTrig = allowBuyREV and bbFlat and maLoOut and wickOnlyBuyOK
+revSellTrig = allowSellREV and bbFlat and maHiOut and wickOnlySellOK
+revBuyInsideOK = not revRequireCloseBackInsideBB or (close > lower)
+revSellInsideOK = not revRequireCloseBackInsideBB or (close < upper)
+revBuyColorOK = not revRequireCandleColor or isBull
+revSellColorOK = not revRequireCandleColor or isBear
+revBuyRaw = revBuyTrig and revBuyInsideOK and revBuyColorOK
+revSellRaw = revSellTrig and revSellInsideOK and revSellColorOK
+revBuy = useBarCloseConfirm ? (revBuyRaw and barstate.isconfirmed) : revBuyRaw
+revSell = useBarCloseConfirm ? (revSellRaw and barstate.isconfirmed) : revSellRaw
+newRevBuy = revBuy and not revBuy[1]
+newRevSell = revSell and not revSell[1]
+
+//====================================================
+// 13) Arm TF1 RE, wait TF2 REV
+//====================================================
+var int tf1ReBuyTime = na
+var int tf1ReSellTime = na
+var bool buyArmed = false
+var bool sellArmed = false
+var bool buyConsumed = false
+var bool sellConsumed = false
+
+if newReBuy
+    tf1ReBuyTime := time
+    buyArmed := true
+    buyConsumed := false
+
+if newReSell
+    tf1ReSellTime := time
+    sellArmed := true
+    sellConsumed := false
+
+barsSinceReBuy = ta.barssince(newReBuy)
+barsSinceReSell = ta.barssince(newReSell)
+
+buyWindowOpen = buyArmed and barsSinceReBuy >= 0 and barsSinceReBuy <= tf2WindowBars
+sellWindowOpen = sellArmed and barsSinceReSell >= 0 and barsSinceReSell <= tf2WindowBars
+
+buySetupBroken = newReSell
+sellSetupBroken = newReBuy
+
+if buyArmed and buySetupBroken
+    buyArmed := false
+
+if sellArmed and sellSetupBroken
+    sellArmed := false
+
+buyNow = buyWindowOpen and not buyConsumed and newTf2RevBuy and not na(tf1ReBuyTime) and tf2RevBuyTime >= tf1ReBuyTime
+sellNow = sellWindowOpen and not sellConsumed and newTf2RevSell and not na(tf1ReSellTime) and tf2RevSellTime >= tf1ReSellTime
+
+if buyNow
+    buyConsumed := true
+    buyArmed := false
+
+if sellNow
+    sellConsumed := true
+    sellArmed := false
+
+if barsSinceReBuy > tf2WindowBars
+    buyArmed := false
+
+if barsSinceReSell > tf2WindowBars
+    sellArmed := false
+
+newBuyNow = buyNow and not buyNow[1]
+newSellNow = sellNow and not sellNow[1]
+
+//====================================================
+// 14) Plots
+//====================================================
+plot(upper, "BB Upper", color=color.new(color.black, 0))
+plot(midBB, "BB Mid", color=color.new(color.gray, 0))
+plot(lower, "BB Lower", color=color.new(color.black, 0))
+plot(ema50, "EMA50", color=color.new(color.lime, 0))
+plot(ma5H, "WMA5 High", color=color.new(color.blue, 0))
+plot(ma10H, "WMA10 High", color=color.new(color.yellow, 0))
+plot(ma5L, "WMA5 Low", color=color.new(color.fuchsia, 0))
+plot(ma10L, "WMA10 Low", color=color.new(color.white, 0))
+
+plotshape(bbFlat, title="BB Flat", style=shape.circle, location=location.top, size=size.tiny, color=color.new(color.gray, 70), text="FLAT")
+plotshape(showLegacyTFRE and newReBuy, title="RE Buy", style=shape.labelup, location=location.belowbar, text="RE BUY", textcolor=color.white, color=color.new(color.teal, 0), size=size.tiny)
+plotshape(showLegacyTFRE and newReSell, title="RE Sell", style=shape.labeldown, location=location.abovebar, text="RE SELL", textcolor=color.white, color=color.new(color.orange, 0), size=size.tiny)
+plotshape(showCurrentTFREV and newRevBuy, title="REV Buy Entry", style=shape.labelup, location=location.belowbar, text="REV BUY", textcolor=color.white, color=color.new(color.purple, 0), size=size.tiny)
+plotshape(showCurrentTFREV and newRevSell, title="REV Sell Entry", style=shape.labeldown, location=location.abovebar, text="REV SELL", textcolor=color.white, color=color.new(color.purple, 0), size=size.tiny)
+plotshape(showDebugTf2Rev and newTf2RevBuy, title="TF2 REV BUY", style=shape.triangleup, location=location.belowbar, text="TF2 REV", textcolor=color.white, color=color.new(color.aqua, 0), size=size.tiny)
+plotshape(showDebugTf2Rev and newTf2RevSell, title="TF2 REV SELL", style=shape.triangledown, location=location.abovebar, text="TF2 REV", textcolor=color.white, color=color.new(color.maroon, 0), size=size.tiny)
+plotshape(newBuyNow, title="BUY NOW", style=shape.labelup, location=location.belowbar, text="BUY NOW", textcolor=color.white, color=color.new(color.green, 0), size=size.small)
+plotshape(newSellNow, title="SELL NOW", style=shape.labeldown, location=location.abovebar, text="SELL NOW", textcolor=color.white, color=color.new(color.red, 0), size=size.small)
+
+//====================================================
+// 15) Status Table
+//====================================================
+
+//var table statusTbl = table.new(position.top_right, 1, 6, border_width=1)
+//if showStatusTable and barstate.islast
+    //table.cell(statusTbl, 0, 0, "TF1=" + tf1 + " | TF2=" + tf2, text_color=color.white, bgcolor=color.new(color.blue, 70))
+    //table.cell(statusTbl, 0, 1, "RE BUY=" + (newReBuy ? "NEW" : buyArmed ? "ARMED" : "NO") + " | RE SELL=" + (newReSell ? "NEW" : sellArmed ? "ARMED" : "NO"), text_color=color.white, bgcolor=color.new(color.black, 0))
+    //table.cell(statusTbl, 0, 2, "TF2 REV BUY=" + (newTf2RevBuy ? "NEW" : "NO") + " | TF2 REV SELL=" + (newTf2RevSell ? "NEW" : "NO"), text_color=color.white, bgcolor=color.new(color.black, 0))
+    //table.cell(statusTbl, 0, 3, "BUY window=" + (buyWindowOpen ? "OPEN" : "OFF") + " | SELL window=" + (sellWindowOpen ? "OPEN" : "OFF"), text_color=color.white, bgcolor=color.new(color.black, 0))
+    //table.cell(statusTbl, 0, 4, "BUY NOW=" + (newBuyNow ? "YES" : "NO") + " | SELL NOW=" + (newSellNow ? "YES" : "NO"), text_color=newBuyNow ? color.lime : newSellNow ? color.red : color.white, bgcolor=color.new(color.black, 0))
+    //table.cell(statusTbl, 0, 5, newBuyNow ? "FINAL: BUY NOW" : newSellNow ? "FINAL: SELL NOW" : "FINAL: NO SIGNAL", text_color=newBuyNow ? color.lime : newSellNow ? color.red : color.yellow, bgcolor=color.new(color.black, 0))
+
+//====================================================
+// 16) Single Any alert() function call
+//====================================================
+fmt(x) => str.tostring(x, format.mintick)
+signalText = newBuyNow and alertNOW ? "BUY NOW" : newSellNow and alertNOW ? "SELL NOW" : newReBuy and alertRE ? "RE BUY" : newReSell and alertRE ? "RE SELL" : newRevBuy and alertREV ? "REV BUY" : newRevSell and alertREV ? "REV SELL" : ""
+signalSide = newBuyNow or newReBuy or newRevBuy ? "BUY" : newSellNow or newReSell or newRevSell ? "SELL" : ""
+signalSource = newBuyNow or newSellNow ? "TF1 RE + TF2 REV" : newReBuy or newReSell ? "TF1 RE" : newRevBuy or newRevSell ? "CURRENT TF REV" : ""
+alertMsg = signalText != "" ? signalText + " | " + signalSource + " | " + syminfo.ticker + " " + timeframe.period + " | close=" + fmt(close) : ""
+alertFreq = alertOncePerBar ? alert.freq_once_per_bar : alert.freq_all
+
+if sendAlerts and alertMsg != ""
+    alert(alertMsg, alertFreq)

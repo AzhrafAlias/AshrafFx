@@ -1,0 +1,251 @@
+//@version=6
+indicator("Ashraf 100% SBR RBS Retest Entry v2 + Trendline", overlay=true, max_lines_count=200, max_labels_count=200)
+
+//=============================
+// INPUTS
+//=============================
+pivotLen            = input.int(4, "Pivot Length", minval=1)
+extendRight         = input.bool(true, "Extend Latest S/R Right")
+showSupport         = input.bool(true, "Show Latest Support")
+showResistance      = input.bool(true, "Show Latest Resistance")
+showBullTrendline   = input.bool(true, "Show Bullish Trendline")
+showBearTrendline   = input.bool(true, "Show Bearish Trendline")
+showEntryLabels     = input.bool(true, "Show Buy/Sell Labels")
+showPivotMarkers    = input.bool(false, "Show Pivot Markers")
+
+atrLen              = input.int(14, "ATR Length", minval=1)
+breakBufferATR      = input.float(0.03, "Breakout Buffer ATR", step=0.01, minval=0.0)
+retestBufferATR     = input.float(0.20, "Retest Buffer ATR", step=0.01, minval=0.0)
+slAtrMult           = input.float(0.20, "SL Buffer ATR", step=0.05, minval=0.0)
+
+useRSIFilter        = input.bool(true, "Use RSI Filter")
+rsiLen              = input.int(14, "RSI Length", minval=1)
+rsiBuyMin           = input.float(45.0, "RSI Min For Buy", step=0.1)
+rsiSellMax          = input.float(55.0, "RSI Max For Sell", step=0.1)
+
+useMAFilter         = input.bool(true, "Use EMA Trend Filter")
+emaFastLen          = input.int(20, "Fast EMA", minval=1)
+emaSlowLen          = input.int(50, "Slow EMA", minval=1)
+
+showSL              = input.bool(true, "Show Suggested SL")
+keepBrokenLevelBars = input.int(15, "Max Retest Bars", minval=1)
+
+//=============================
+// CORE DATA
+//=============================
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+phBar = bar_index - pivotLen
+plBar = bar_index - pivotLen
+
+atr = ta.atr(atrLen)
+breakBuffer = atr * breakBufferATR
+retestBuffer = atr * retestBufferATR
+slBuffer = atr * slAtrMult
+
+rsi = ta.rsi(close, rsiLen)
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+//=============================
+// LATEST SUPPORT / RESISTANCE
+//=============================
+var float latestResistance = na
+var int latestResistanceBar = na
+var line latestResistanceLine = na
+
+var float latestSupport = na
+var int latestSupportBar = na
+var line latestSupportLine = na
+
+//=============================
+// TRENDLINE STORAGE
+//=============================
+var float prevPHPrice = na
+var float lastPHPrice = na
+var int   prevPHBar   = na
+var int   lastPHBar   = na
+
+var float prevPLPrice = na
+var float lastPLPrice = na
+var int   prevPLBar   = na
+var int   lastPLBar   = na
+
+var line bullTrendline = na
+var line bearTrendline = na
+
+//=============================
+// BROKEN LEVEL MEMORY
+//=============================
+var float brokenResistanceForBuy = na
+var int brokenResistanceBar = na
+var bool waitBuyRetest = false
+
+var float brokenSupportForSell = na
+var int brokenSupportBar = na
+var bool waitSellRetest = false
+
+//=============================
+// HELPER FUNCTIONS
+//=============================
+f_breaks_above(_level) =>
+    close > (_level + breakBuffer) and close[1] <= (_level + breakBuffer)
+
+f_breaks_below(_level) =>
+    close < (_level - breakBuffer) and close[1] >= (_level - breakBuffer)
+
+f_bull_retest_ok(_level) =>
+    touched = low <= (_level + retestBuffer)
+    closeAbove = close > _level
+    bullishBody = close > open
+    touched and closeAbove and bullishBody
+
+f_bear_retest_ok(_level) =>
+    touched = high >= (_level - retestBuffer)
+    closeBelow = close < _level
+    bearishBody = close < open
+    touched and closeBelow and bearishBody
+
+//=============================
+// UPDATE LATEST RESISTANCE + BEAR TRENDLINE
+//=============================
+if not na(ph)
+    prevPHPrice := lastPHPrice
+    prevPHBar := lastPHBar
+    lastPHPrice := ph
+    lastPHBar := phBar
+
+    latestResistance := ph
+    latestResistanceBar := phBar
+
+    if not na(latestResistanceLine)
+        line.delete(latestResistanceLine)
+    if showResistance
+        latestResistanceLine := line.new(latestResistanceBar, latestResistance, bar_index, latestResistance, extend=extendRight ? extend.right : extend.none, color=color.red, width=2)
+
+    if showBearTrendline and not na(prevPHPrice) and not na(prevPHBar)
+        if not na(bearTrendline)
+            line.delete(bearTrendline)
+        bearTrendline := line.new(prevPHBar, prevPHPrice, lastPHBar, lastPHPrice, extend=extend.right, color=color.orange, width=2)
+
+//=============================
+// UPDATE LATEST SUPPORT + BULL TRENDLINE
+//=============================
+if not na(pl)
+    prevPLPrice := lastPLPrice
+    prevPLBar := lastPLBar
+    lastPLPrice := pl
+    lastPLBar := plBar
+
+    latestSupport := pl
+    latestSupportBar := plBar
+
+    if not na(latestSupportLine)
+        line.delete(latestSupportLine)
+    if showSupport
+        latestSupportLine := line.new(latestSupportBar, latestSupport, bar_index, latestSupport, extend=extendRight ? extend.right : extend.none, color=color.lime, width=2)
+
+    if showBullTrendline and not na(prevPLPrice) and not na(prevPLBar)
+        if not na(bullTrendline)
+            line.delete(bullTrendline)
+        bullTrendline := line.new(prevPLBar, prevPLPrice, lastPLBar, lastPLPrice, extend=extend.right, color=color.aqua, width=2)
+
+//=============================
+// DETECT BREAKOUT -> ARM RETEST
+//=============================
+resistanceBrokenUp = not na(latestResistance) and f_breaks_above(latestResistance)
+supportBrokenDown = not na(latestSupport) and f_breaks_below(latestSupport)
+
+if resistanceBrokenUp
+    brokenResistanceForBuy := latestResistance
+    brokenResistanceBar := bar_index
+    waitBuyRetest := true
+
+if supportBrokenDown
+    brokenSupportForSell := latestSupport
+    brokenSupportBar := bar_index
+    waitSellRetest := true
+
+//=============================
+// EXPIRE OLD SETUP
+//=============================
+if waitBuyRetest and not na(brokenResistanceBar) and (bar_index - brokenResistanceBar > keepBrokenLevelBars)
+    waitBuyRetest := false
+    brokenResistanceForBuy := na
+    brokenResistanceBar := na
+
+if waitSellRetest and not na(brokenSupportBar) and (bar_index - brokenSupportBar > keepBrokenLevelBars)
+    waitSellRetest := false
+    brokenSupportForSell := na
+    brokenSupportBar := na
+
+//=============================
+// FILTERS
+//=============================
+buyRsiOk = not useRSIFilter or rsi >= rsiBuyMin
+sellRsiOk = not useRSIFilter or rsi <= rsiSellMax
+
+buyMaOk = not useMAFilter or (emaFast > emaSlow)
+sellMaOk = not useMAFilter or (emaFast < emaSlow)
+
+buyBarsPassedOk = waitBuyRetest and not na(brokenResistanceBar) and bar_index > brokenResistanceBar
+sellBarsPassedOk = waitSellRetest and not na(brokenSupportBar) and bar_index > brokenSupportBar
+
+//=============================
+// 100% RBS / SBR RETEST ENTRY
+//=============================
+buyRetest = buyBarsPassedOk and not na(brokenResistanceForBuy) and f_bull_retest_ok(brokenResistanceForBuy)
+sellRetest = sellBarsPassedOk and not na(brokenSupportForSell) and f_bear_retest_ok(brokenSupportForSell)
+
+buySignal = buyRetest and buyRsiOk and buyMaOk
+sellSignal = sellRetest and sellRsiOk and sellMaOk
+
+finalBuy = buySignal and not sellSignal
+finalSell = sellSignal and not buySignal
+
+buySLLevel = brokenResistanceForBuy
+sellSLLevel = brokenSupportForSell
+
+if finalBuy
+    waitBuyRetest := false
+    brokenResistanceForBuy := na
+    brokenResistanceBar := na
+
+if finalSell
+    waitSellRetest := false
+    brokenSupportForSell := na
+    brokenSupportBar := na
+
+//=============================
+// SUGGESTED SL
+//=============================
+buySL = finalBuy and not na(buySLLevel) ? buySLLevel - slBuffer : na
+sellSL = finalSell and not na(sellSLLevel) ? sellSLLevel + slBuffer : na
+
+//=============================
+// OPTIONAL EMA PLOTS
+//=============================
+plot(useMAFilter ? emaFast : na, "EMA Fast", color=color.yellow, linewidth=1)
+plot(useMAFilter ? emaSlow : na, "EMA Slow", color=color.blue, linewidth=1)
+
+//=============================
+// OPTIONAL PIVOT MARKERS
+//=============================
+plotshape(showPivotMarkers and not na(ph), title="Pivot High", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, offset=-pivotLen)
+plotshape(showPivotMarkers and not na(pl), title="Pivot Low", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny, offset=-pivotLen)
+
+//=============================
+// ENTRY LABELS ONLY
+//=============================
+plotshape(showEntryLabels and finalBuy, title="BUY", text="BUY", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.small)
+plotshape(showEntryLabels and finalSell, title="SELL", text="SELL", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.small)
+
+plot(showSL ? buySL : na, title="Buy SL", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(showSL ? sellSL : na, title="Sell SL", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+
+//=============================
+// ALERTS
+//=============================
+alertcondition(finalBuy, title="BUY Signal", message="BUY: Resistance became support (RBS) and bullish retest confirmed")
+alertcondition(finalSell, title="SELL Signal", message="SELL: Support became resistance (SBR) and bearish retest confirmed")

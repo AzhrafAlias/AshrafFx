@@ -1,0 +1,125 @@
+//@version=5
+indicator("BBMA Reentry FINAL (Alert Ready)", overlay=true)
+
+// ==========================
+// BB
+// ==========================
+bbLength = 20
+bbDev    = 2.0
+
+basis = ta.sma(close, bbLength)
+dev   = bbDev * ta.stdev(close, bbLength)
+
+upperBB = basis + dev
+lowerBB = basis - dev
+
+// ==========================
+// MA BBMA (LWMA)
+// ==========================
+ma5_high  = ta.wma(high, 5)
+ma10_high = ta.wma(high, 10)
+
+ma5_low   = ta.wma(low, 5)
+ma10_low  = ta.wma(low, 10)
+
+// ==========================
+// MOMENTUM
+// ==========================
+momentumBuy  = close > upperBB and close > open
+momentumSell = close < lowerBB and close < open
+
+var bool waitBuy  = false
+var bool waitSell = false
+
+var int buyBar  = na
+var int sellBar = na
+
+if momentumBuy
+    waitBuy := true
+    waitSell := false
+    buyBar := bar_index
+
+if momentumSell
+    waitSell := true
+    waitBuy := false
+    sellBar := bar_index
+
+// ==========================
+// VALID WINDOW (5 candle)
+// ==========================
+validBuyWindow  = (bar_index - buyBar) <= 5
+validSellWindow = (bar_index - sellBar) <= 5
+
+// ==========================
+// WICK ONLY LOGIC
+// ==========================
+wickTouchBuy  = (low <= ma5_low or low <= ma10_low)
+bodyValidBuy  = open > ma5_low and close > ma5_low
+
+wickTouchSell = (high >= ma5_high or high >= ma10_high)
+bodyValidSell = open < ma5_high and close < ma5_high
+
+// ==========================
+// ANTI-SPAM
+// ==========================
+var int lastSignalBar = na
+canSignal = na(lastSignalBar) or bar_index > lastSignalBar
+
+// ==========================
+// SIGNAL
+// ==========================
+reBuy =
+     waitBuy and
+     bar_index > buyBar and
+     validBuyWindow and
+     wickTouchBuy and
+     bodyValidBuy and
+     canSignal
+
+reSell =
+     waitSell and
+     bar_index > sellBar and
+     validSellWindow and
+     wickTouchSell and
+     bodyValidSell and
+     canSignal
+
+// ==========================
+// ALERT FUNCTION
+// ==========================
+if reBuy
+    lastSignalBar := bar_index
+    waitBuy := false
+
+    alert("BBMA RE BUY | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if reSell
+    lastSignalBar := bar_index
+    waitSell := false
+
+    alert("BBMA RE SELL | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+// cancel expired
+if waitBuy and not validBuyWindow
+    waitBuy := false
+
+if waitSell and not validSellWindow
+    waitSell := false
+
+// ==========================
+// PLOT
+// ==========================
+plotshape(reBuy, location=location.belowbar,
+     color=color.lime, style=shape.labelup, text="RE BUY")
+
+plotshape(reSell, location=location.abovebar,
+     color=color.red, style=shape.labeldown, text="RE SELL")
+
+plot(upperBB, color=color.white)
+plot(lowerBB, color=color.white)
+
+plot(ma5_high, color=color.white)
+plot(ma10_high, color=color.white)
+
+plot(ma5_low, color=color.white)
+plot(ma10_low, color=color.white)

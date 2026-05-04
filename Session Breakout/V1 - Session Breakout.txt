@@ -1,0 +1,88 @@
+//@version=5
+indicator("Breakout Pagi (6-7-8-9 AM) - FIXED", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ── SETTINGS ─────────────────────────────────────────────
+i_tz        = input.string("Asia/Kuala_Lumpur", "Timezone",
+                 options=["Asia/Kuala_Lumpur", "Asia/Singapore", "Asia/Jakarta", "UTC"])
+i_col_high  = input.color(color.new(color.green, 0),  "Warna High Line")
+i_col_low   = input.color(color.new(color.red, 0),    "Warna Low Line")
+i_col_buy   = input.color(color.new(color.lime, 0),   "Warna Label BUY")
+i_col_sell  = input.color(color.new(color.red, 0),    "Warna Label SELL")
+i_bg_zone   = input.bool(true,  "Tunjuk Shading Waktu")
+i_show_line = input.bool(true,  "Tunjuk Garisan High/Low")
+
+// ── TIME ────────────────────────────────────────────────
+bar_h    = hour(time, i_tz)
+bar_date = str.tostring(year(time, i_tz)) + "-" +
+           str.tostring(month(time, i_tz)) + "-" +
+           str.tostring(dayofmonth(time, i_tz))
+
+// ── STATE ───────────────────────────────────────────────
+var float  lvl_low    = na
+var float  lvl_high   = na
+var string last_date  = ""
+var bool   sig_done   = false
+var line   ln_high    = na
+var line   ln_low     = na
+var int    bar_start  = na
+
+// ── RESET DAILY ─────────────────────────────────────────
+if bar_date != last_date
+    last_date  := bar_date
+    lvl_low    := na
+    lvl_high   := na
+    sig_done   := false
+    bar_start  := bar_index
+
+    if not na(ln_high)
+        line.delete(ln_high)
+    if not na(ln_low)
+        line.delete(ln_low)
+
+// ── STEP 1: LOW 6AM ─────────────────────────────────────
+if bar_h == 6
+    lvl_low := na(lvl_low) ? low : math.min(lvl_low, low)
+
+// ── STEP 2: HIGH 7–8AM ──────────────────────────────────
+if bar_h == 7 or bar_h == 8
+    lvl_high := na(lvl_high) ? high : math.max(lvl_high, high)
+
+// ── DRAW HORIZONTAL LINES ───────────────────────────────
+if i_show_line and not na(lvl_high) and bar_h >= 7
+    if not na(ln_high)
+        line.delete(ln_high)
+    ln_high := line.new(bar_start, lvl_high, bar_index, lvl_high, color=i_col_high, width=1, style=line.style_dashed)
+
+if i_show_line and not na(lvl_low) and bar_h >= 6
+    if not na(ln_low)
+        line.delete(ln_low)
+    ln_low := line.new(bar_start, lvl_low, bar_index, lvl_low, color=i_col_low, width=1, style=line.style_dashed)
+
+// ── STEP 3: BREAKOUT 9AM ONLY ───────────────────────────
+buy_sig  = bar_h == 9 and not sig_done and not na(lvl_high) and close > lvl_high
+sell_sig = bar_h == 9 and not sig_done and not na(lvl_low)  and close < lvl_low
+
+if buy_sig
+    label.new(bar_index, low, "BUY\nBreak High", color=i_col_buy, textcolor=color.black, style=label.style_label_up)
+    sig_done := true
+
+if sell_sig
+    label.new(bar_index, high, "SELL\nBreak Low", color=i_col_sell, textcolor=color.white, style=label.style_label_down)
+    sig_done := true
+
+// ── SHAPE SIGNAL ────────────────────────────────────────
+plotshape(buy_sig, title="BUY", style=shape.triangleup, location=location.belowbar, color=color.lime)
+plotshape(sell_sig, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red)
+
+// ── BACKGROUND ZONE ─────────────────────────────────────
+bg_6am = i_bg_zone and bar_h == 6
+bg_78  = i_bg_zone and (bar_h == 7 or bar_h == 8)
+bg_9am = i_bg_zone and bar_h == 9
+
+bgcolor(bg_6am ? color.new(color.red, 88) : na)
+bgcolor(bg_78  ? color.new(color.green, 88) : na)
+bgcolor(bg_9am ? color.new(color.blue, 88) : na)
+
+// ── ALERT ───────────────────────────────────────────────
+alertcondition(buy_sig, title="BUY", message="BUY - Break HIGH")
+alertcondition(sell_sig, title="SELL", message="SELL - Break LOW")

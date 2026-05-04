@@ -1,0 +1,211 @@
+//@version=6
+indicator("Ashraf Envelope + RSI/10SMMA + Buy Sell Signal", overlay=false, max_labels_count=500, max_lines_count=500)
+
+//==================================================
+// INPUTS
+//==================================================
+groupEnv = "Step 1 - Envelopes Main Chart"
+envPeriod = input.int(50, "Envelope Period", minval=1, group=groupEnv)
+envSrc = input.source(close, "Envelope Source", group=groupEnv)
+envDev1 = input.float(0.823, "Deviation 1", step=0.001, group=groupEnv)
+envDev2 = input.float(0.783, "Deviation 2", step=0.001, group=groupEnv)
+envDev3 = input.float(0.763, "Deviation 3", step=0.001, group=groupEnv)
+envDev4 = input.float(0.423, "Deviation 4", step=0.001, group=groupEnv)
+
+groupPane = "Step 2 - Indicator Window"
+paneSrc = input.source(close, "Pane Source", group=groupPane)
+normLookback = input.int(200, "Normalization Lookback", minval=20, group=groupPane)
+
+groupSignal = "Signal Logic"
+setupBars = input.int(6, "Max Bars Wait For Confirmation", minval=1, group=groupSignal)
+requireOuterZoneOnly = input.bool(false, "Require Strong Zone Only", group=groupSignal)
+showSignalLabels = input.bool(true, "Show Buy/Sell Labels", group=groupSignal)
+alertOnBarCloseOnly = input.bool(true, "Alert On Bar Close Only", group=groupSignal)
+
+//==================================================
+// STEP 1 - ENVELOPES (MAIN CHART)
+//==================================================
+envBase = ta.rma(envSrc, envPeriod)
+
+envUpper1 = envBase * (1 + envDev1 / 100.0)
+envLower1 = envBase * (1 - envDev1 / 100.0)
+
+envUpper2 = envBase * (1 + envDev2 / 100.0)
+envLower2 = envBase * (1 - envDev2 / 100.0)
+
+envUpper3 = envBase * (1 + envDev3 / 100.0)
+envLower3 = envBase * (1 - envDev3 / 100.0)
+
+envUpper4 = envBase * (1 + envDev4 / 100.0)
+envLower4 = envBase * (1 - envDev4 / 100.0)
+
+// Plot Envelopes on main chart
+plot(envUpper1, "Env Upper 0.823", color=color.green, linewidth=1, force_overlay=true)
+plot(envLower1, "Env Lower 0.823", color=color.red, linewidth=1, force_overlay=true)
+
+plot(envUpper2, "Env Upper 0.783", color=color.green, linewidth=1, force_overlay=true)
+plot(envLower2, "Env Lower 0.783", color=color.red, linewidth=1, force_overlay=true)
+
+plot(envUpper3, "Env Upper 0.763", color=color.green, linewidth=1, force_overlay=true)
+plot(envLower3, "Env Lower 0.763", color=color.red, linewidth=1, force_overlay=true)
+
+plot(envUpper4, "Env Upper 0.423", color=color.green, linewidth=1, force_overlay=true)
+plot(envLower4, "Env Lower 0.423", color=color.red, linewidth=1, force_overlay=true)
+
+//==================================================
+// STEP 2 - RSI 1 + 10 SMMA IN INDICATOR WINDOW
+//==================================================
+rsi1 = ta.rsi(paneSrc, 1)
+
+smma1 = ta.rma(paneSrc, 1)
+smma2 = ta.rma(paneSrc, 2)
+smma3 = ta.rma(paneSrc, 3)
+smma4 = ta.rma(paneSrc, 4)
+smma5 = ta.rma(paneSrc, 5)
+smma6 = ta.rma(paneSrc, 6)
+smma7 = ta.rma(paneSrc, 7)
+smma8 = ta.rma(paneSrc, 8)
+smma9 = ta.rma(paneSrc, 9)
+smma10 = ta.rma(paneSrc, 10)
+
+f_norm(_x, _len) =>
+    _lo = ta.lowest(_x, _len)
+    _hi = ta.highest(_x, _len)
+    _range = _hi - _lo
+    _range == 0 ? 50.0 : ((_x - _lo) / _range) * 100.0
+
+n1 = f_norm(smma1, normLookback)
+n2 = f_norm(smma2, normLookback)
+n3 = f_norm(smma3, normLookback)
+n4 = f_norm(smma4, normLookback)
+n5 = f_norm(smma5, normLookback)
+n6 = f_norm(smma6, normLookback)
+n7 = f_norm(smma7, normLookback)
+n8 = f_norm(smma8, normLookback)
+n9 = f_norm(smma9, normLookback)
+n10 = f_norm(smma10, normLookback)
+
+// Fast/slow groups for confirmation
+orangeAvg = (n1 + n2 + n3 + n4) / 4.0
+purpleAvg = (n5 + n6 + n7 + n8 + n9 + n10) / 6.0
+
+// Pane levels
+hline(80, "SELL", color=color.red, linestyle=hline.style_dashed)
+hline(20, "BUY", color=color.green, linestyle=hline.style_dashed)
+hline(50, "MID", color=color.new(color.gray, 75), linestyle=hline.style_dotted)
+
+// Pane plots
+plot(rsi1, "RSI 1", color=color.new(color.gray, 40), linewidth=1)
+
+plot(n1, "SMMA 1", color=color.orange, linewidth=1)
+plot(n2, "SMMA 2", color=color.orange, linewidth=1)
+plot(n3, "SMMA 3", color=color.orange, linewidth=1)
+plot(n4, "SMMA 4", color=color.orange, linewidth=1)
+
+plot(n5, "SMMA 5", color=color.purple, linewidth=1)
+plot(n6, "SMMA 6", color=color.purple, linewidth=1)
+plot(n7, "SMMA 7", color=color.purple, linewidth=1)
+plot(n8, "SMMA 8", color=color.purple, linewidth=1)
+plot(n9, "SMMA 9", color=color.purple, linewidth=1)
+plot(n10, "SMMA 10", color=color.purple, linewidth=1)
+
+plot(orangeAvg, "Orange Avg", color=color.orange, linewidth=2)
+plot(purpleAvg, "Purple Avg", color=color.purple, linewidth=2)
+
+//==================================================
+// SOP LOGIC
+// STEP 1:
+//  - Candle touch upper envelope => sell zone
+//  - Candle touch lower envelope => buy zone
+// STEP 2:
+//  - RSI below 20 => buy
+//  - RSI above 80 => sell
+//  - Confirmation: orange cross above purple => buy
+//                  orange cross below purple => sell
+//==================================================
+
+// Zone definitions
+buyZoneTouch = requireOuterZoneOnly ? low <= envLower1 : low <= envLower4
+sellZoneTouch = requireOuterZoneOnly ? high >= envUpper1 : high >= envUpper4
+
+buyStrongZone = low <= envLower1
+sellStrongZone = high >= envUpper1
+
+rsiBuyExtreme = rsi1 <= 20
+rsiSellExtreme = rsi1 >= 80
+
+buyCross = ta.crossover(orangeAvg, purpleAvg)
+sellCross = ta.crossunder(orangeAvg, purpleAvg)
+
+purpleBelowOrange = purpleAvg < orangeAvg
+purpleAboveOrange = purpleAvg > orangeAvg
+
+// Arm setup when Step 1 + RSI extreme happen
+var int buyArmBar = na
+var int sellArmBar = na
+var bool buyArmed = false
+var bool sellArmed = false
+var bool buyStrongArmed = false
+var bool sellStrongArmed = false
+
+if buyZoneTouch and rsiBuyExtreme
+    buyArmed := true
+    buyArmBar := bar_index
+    buyStrongArmed := buyStrongZone
+
+if sellZoneTouch and rsiSellExtreme
+    sellArmed := true
+    sellArmBar := bar_index
+    sellStrongArmed := sellStrongZone
+
+// Expire old setups
+if buyArmed and not na(buyArmBar) and bar_index - buyArmBar > setupBars
+    buyArmed := false
+    buyArmBar := na
+    buyStrongArmed := false
+
+if sellArmed and not na(sellArmBar) and bar_index - sellArmBar > setupBars
+    sellArmed := false
+    sellArmBar := na
+    sellStrongArmed := false
+
+// Final entry signal
+buySignal = buyArmed and buyCross and purpleBelowOrange
+sellSignal = sellArmed and sellCross and purpleAboveOrange
+
+// Reset after valid signal
+if buySignal
+    buyArmed := false
+    buyArmBar := na
+    buyStrongArmed := false
+    sellArmed := false
+    sellArmBar := na
+    sellStrongArmed := false
+
+if sellSignal
+    sellArmed := false
+    sellArmBar := na
+    sellStrongArmed := false
+    buyArmed := false
+    buyArmBar := na
+    buyStrongArmed := false
+
+//==================================================
+// SIGNAL VISUALS ON MAIN CHART
+//==================================================
+plotshape(showSignalLabels and buySignal and not (buyStrongZone or buyStrongArmed), title="BUY", text="BUY", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.small, force_overlay=true)
+plotshape(showSignalLabels and buySignal and (buyStrongZone or buyStrongArmed), title="STRONG BUY", text="STRONG BUY", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.small, force_overlay=true)
+
+plotshape(showSignalLabels and sellSignal and not (sellStrongZone or sellStrongArmed), title="SELL", text="SELL", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.small, force_overlay=true)
+plotshape(showSignalLabels and sellSignal and (sellStrongZone or sellStrongArmed), title="STRONG SELL", text="STRONG SELL", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.small, force_overlay=true)
+
+//==================================================
+// ALERTS - Any alert() function call
+//==================================================
+canFire = alertOnBarCloseOnly ? barstate.isconfirmed : (barstate.isrealtime or barstate.isconfirmed)
+
+if canFire
+    if buySignal
+        alert((buyStrongZone or buyStrongArmed ? "STRONG BUY" : "BUY") + " | Envelope lower zone + RSI<20 + Orange cross up Purple | " + syminfo.ticker + " | TF: " + timeframe.period + " | Price: " + str.tostring(close), alert.freq_once_per_bar_close)
+    if sellSignal
+        alert((sellStrongZone or sellStrongArmed ? "STRONG SELL" : "SELL") + " | Envelope upper zone + RSI>80 + Orange cross down Purple | " + syminfo.ticker + " | TF: " + timeframe.period + " | Price: " + str.tostring(close), alert.freq_once_per_bar_close)

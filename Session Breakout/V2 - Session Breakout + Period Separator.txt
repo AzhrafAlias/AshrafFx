@@ -1,0 +1,74 @@
+//@version=5
+indicator("Breakout Pagi (After 9AM + 6AM Separator)", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ── SETTINGS ─────────────────────────────────────────────
+i_tz        = input.string("Asia/Kuala_Lumpur", "Timezone",
+                 options=["Asia/Kuala_Lumpur", "Asia/Singapore", "Asia/Jakarta", "UTC"])
+i_col_high  = input.color(color.green, "High Line")
+i_col_low   = input.color(color.red, "Low Line")
+i_col_buy   = input.color(color.lime, "BUY Label")
+i_col_sell  = input.color(color.red, "SELL Label")
+i_show_sep  = input.bool(true, "Show 6AM Separator")
+
+// ── TIME ────────────────────────────────────────────────
+bar_h = hour(time, i_tz)
+
+// ── STATE ───────────────────────────────────────────────
+var float lvl_low   = na
+var float lvl_high  = na
+var bool  sig_done  = false
+var line  ln_high   = na
+var line  ln_low    = na
+var line  sep_line  = na
+var int   bar_start = na
+
+// ── RESET + SEPARATOR AT 6AM ────────────────────────────
+if bar_h == 6
+    lvl_low   := na
+    lvl_high  := na
+    sig_done  := false
+    bar_start := bar_index
+
+    // delete old lines
+    if not na(ln_high)
+        line.delete(ln_high)
+    if not na(ln_low)
+        line.delete(ln_low)
+
+    // draw separator exactly at 6AM
+    if i_show_sep
+        sep_line := line.new(bar_index, high, bar_index, low, color=color.gray, style=line.style_dotted, extend=extend.both)
+
+// ── STEP 1: LOW 6AM ─────────────────────────────────────
+if bar_h == 6
+    lvl_low := low
+
+// ── STEP 2: HIGH 7–8AM ──────────────────────────────────
+if bar_h == 7 or bar_h == 8
+    lvl_high := na(lvl_high) ? high : math.max(lvl_high, high)
+
+// ── DRAW LINES ──────────────────────────────────────────
+if not na(lvl_high)
+    if not na(ln_high)
+        line.delete(ln_high)
+    ln_high := line.new(bar_start, lvl_high, bar_index, lvl_high, color=i_col_high, width=2)
+
+if not na(lvl_low)
+    if not na(ln_low)
+        line.delete(ln_low)
+    ln_low := line.new(bar_start, lvl_low, bar_index, lvl_low, color=i_col_low, width=2)
+
+// ── BREAKOUT AFTER 9AM ──────────────────────────────────
+buy_sig  = bar_h >= 9 and not sig_done and not na(lvl_high) and close > lvl_high
+sell_sig = bar_h >= 9 and not sig_done and not na(lvl_low)  and close < lvl_low
+
+// ── SIGNAL + ALERT ──────────────────────────────────────
+if buy_sig
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=i_col_buy, textcolor=color.black)
+    alert("BUY - Break 7-8AM High", alert.freq_once_per_bar_close)
+    sig_done := true
+
+if sell_sig
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=i_col_sell, textcolor=color.white)
+    alert("SELL - Break 6AM Low", alert.freq_once_per_bar_close)
+    sig_done := true

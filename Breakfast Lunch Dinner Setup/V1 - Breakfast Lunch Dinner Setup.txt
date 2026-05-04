@@ -1,0 +1,411 @@
+//@version=5
+indicator("Breakfast Lunch Dinner Setup + Auto Fib PRO FIXED", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ── SETTINGS ─────────────────────────────────────────────
+i_tz        = input.string("Asia/Kuala_Lumpur", "Timezone")
+i_col_buy   = input.color(color.rgb(0, 230, 119, 83), "BUY Label")
+i_col_sell  = input.color(color.rgb(255, 82, 82, 81), "SELL Label")
+i_box_b     = input.color(color.new(color.blue, 85), "Breakfast Box")
+i_box_l     = input.color(color.new(color.orange, 85), "Lunch Box")
+i_box_d     = input.color(color.new(color.purple, 85), "Dinner Box")
+enableAlerts = input.bool(true, "Enable Alerts")
+
+// ── TREND FILTER ─────────────────────────────────────────
+useTrendFilter = input.bool(true, "Use Trend Filter EMA")
+emaLen         = input.int(50, "EMA Length", minval=1)
+showEMA        = input.bool(true, "Show EMA")
+
+// ── TP/SL SETTINGS ───────────────────────────────────────
+showTPSL    = input.bool(true, "Show TP/SL Auto")
+tpLineBars  = input.int(30, "TP/SL Line Extend Bars", minval=1)
+tp1RR       = input.float(1.0, "TP1 Box Range Multiplier")
+tp2RR       = input.float(2.0, "TP2 Box Range Multiplier")
+
+// ── FIB SETTINGS ─────────────────────────────────────────
+showFib     = input.bool(true, "Show Auto Fibonacci")
+fibTF       = input.timeframe("240", "Fibonacci TF")
+fibPivotLen = input.int(4, "Fib Pivot Length", minval=1)
+
+// ── TIME ────────────────────────────────────────────────
+bar_h = hour(time, i_tz)
+bar_m = minute(time, i_tz)
+
+// =======================================================
+// M5 CHART VALIDATION
+// =======================================================
+isM5Chart = timeframe.period == "5"
+
+var label tfWarn = na
+
+if barstate.islast
+    if not isM5Chart
+        if not na(tfWarn)
+            label.delete(tfWarn)
+        tfWarn := label.new(
+             bar_index,
+             high,
+             "WARNING\nUse this setup on M5 chart only",
+             style=label.style_label_down,
+             color=color.red,
+             textcolor=color.white)
+    else
+        if not na(tfWarn)
+            label.delete(tfWarn)
+            tfWarn := na
+
+// =======================================================
+// MTF DATA
+// =======================================================
+
+// M30
+m30_high = request.security(syminfo.tickerid, "30", high)
+m30_low  = request.security(syminfo.tickerid, "30", low)
+m30_time = request.security(syminfo.tickerid, "30", time)
+
+m30_h = hour(m30_time, i_tz)
+m30_m = minute(m30_time, i_tz)
+
+// M5
+m5_high  = request.security(syminfo.tickerid, "5", high)
+m5_low   = request.security(syminfo.tickerid, "5", low)
+m5_close = request.security(syminfo.tickerid, "5", close)
+m5_ema   = request.security(syminfo.tickerid, "5", ta.ema(close, emaLen))
+
+plot(showEMA ? m5_ema : na, title="EMA Trend Filter", color=color.yellow, linewidth=2)
+
+// =======================================================
+// TP/SL FUNCTION
+// =======================================================
+drawTPSL(_isBuy, _entry, _sl, _tp1, _tp2, _name) =>
+    if showTPSL
+        line.new(bar_index, _entry, bar_index + tpLineBars, _entry, xloc=xloc.bar_index, color=color.white, width=1)
+        line.new(bar_index, _sl,    bar_index + tpLineBars, _sl,    xloc=xloc.bar_index, color=color.red, width=1)
+        line.new(bar_index, _tp1,   bar_index + tpLineBars, _tp1,   xloc=xloc.bar_index, color=color.lime, width=1)
+        line.new(bar_index, _tp2,   bar_index + tpLineBars, _tp2,   xloc=xloc.bar_index, color=color.green, width=1)
+
+        label.new(bar_index + tpLineBars, _entry, _name + " ENTRY", xloc=xloc.bar_index, style=label.style_label_left, color=color.white, textcolor=color.black)
+        label.new(bar_index + tpLineBars, _sl, "SL", xloc=xloc.bar_index, style=label.style_label_left, color=color.red, textcolor=color.white)
+        label.new(bar_index + tpLineBars, _tp1, "TP1", xloc=xloc.bar_index, style=label.style_label_left, color=color.lime, textcolor=color.black)
+        label.new(bar_index + tpLineBars, _tp2, "TP2", xloc=xloc.bar_index, style=label.style_label_left, color=color.green, textcolor=color.white)
+
+// =======================================================
+// BREAKFAST
+// =======================================================
+var float b_high = na
+var float b_low  = na
+var bool  b_done = false
+var box   b_box  = na
+
+if (m30_h == 7) and (m30_m == 0)
+    b_high := m30_high
+    b_low  := m30_low
+    b_done := false
+
+    if not na(b_box)
+        box.delete(b_box)
+
+    b_box := box.new(
+         m30_time,
+         b_high,
+         m30_time + 18000000,
+         b_low,
+         xloc=xloc.bar_time,
+         bgcolor=i_box_b,
+         border_color=color.blue)
+
+// =======================================================
+// LUNCH
+// =======================================================
+var float l_high = na
+var float l_low  = na
+var bool  l_done = false
+var box   l_box  = na
+
+if (m30_h == 14) and (m30_m == 0)
+    l_high := m30_high
+    l_low  := m30_low
+    l_done := false
+
+    if not na(l_box)
+        box.delete(l_box)
+
+    l_box := box.new(
+         m30_time,
+         l_high,
+         m30_time + 18000000,
+         l_low,
+         xloc=xloc.bar_time,
+         bgcolor=i_box_l,
+         border_color=color.orange)
+
+// =======================================================
+// DINNER
+// =======================================================
+var float d_high = na
+var float d_low  = na
+var bool  d_done = false
+var box   d_box  = na
+
+if (m30_h == 19) and (m30_m == 0)
+    d_high := m30_high
+    d_low  := m30_low
+    d_done := false
+
+    if not na(d_box)
+        box.delete(d_box)
+
+    d_box := box.new(
+         m30_time,
+         d_high,
+         m30_time + 18000000,
+         d_low,
+         xloc=xloc.bar_time,
+         bgcolor=i_box_d,
+         border_color=color.purple)
+
+// =======================================================
+// SESSION ACTIVE TIME
+// =======================================================
+
+// Breakfast aktif 7:30 pagi sampai sebelum 2:00 petang
+condB = ((bar_h == 7 and bar_m >= 30) or (bar_h > 7 and bar_h < 14))
+
+// Lunch aktif 2:30 petang sampai sebelum 7:00 malam
+condL = ((bar_h == 14 and bar_m >= 30) or (bar_h > 14 and bar_h < 19))
+
+// Dinner aktif 7:30 malam sampai 11:59 malam
+condD = ((bar_h == 19 and bar_m >= 30) or (bar_h > 19 and bar_h <= 23))
+
+// =======================================================
+// STRICT M5 BREAKOUT + TREND FILTER
+// =======================================================
+
+// Strict candle penuh:
+// BUY  = seluruh candle M5 berada atas box
+// SELL = seluruh candle M5 berada bawah box
+
+trendBuyOK  = not useTrendFilter or m5_close > m5_ema
+trendSellOK = not useTrendFilter or m5_close < m5_ema
+
+// =======================================================
+// BREAKFAST SIGNAL
+// =======================================================
+if isM5Chart and condB and not b_done and not na(b_high) and not na(b_low)
+    b_range = b_high - b_low
+
+    buyBreakB  = m5_low > b_high
+    sellBreakB = m5_high < b_low
+
+    if buyBreakB and trendBuyOK
+        entry = m5_close
+        sl    = b_low
+        tp1   = entry + b_range * tp1RR
+        tp2   = entry + b_range * tp2RR
+
+        label.new(bar_index, low, "BUY\nBREAKFAST\nM5", style=label.style_label_up, color=i_col_buy, textcolor=color.white)
+
+        drawTPSL(true, entry, sl, tp1, tp2, "B BUY")
+
+        if enableAlerts
+            alert("BUY Breakfast M5 Strict Breakout", alert.freq_once_per_bar_close)
+
+        b_done := true
+
+    else if sellBreakB and trendSellOK
+        entry = m5_close
+        sl    = b_high
+        tp1   = entry - b_range * tp1RR
+        tp2   = entry - b_range * tp2RR
+
+        label.new(bar_index, high, "SELL\nBREAKFAST\nM5", style=label.style_label_down, color=i_col_sell, textcolor=color.white)
+
+        drawTPSL(false, entry, sl, tp1, tp2, "B SELL")
+
+        if enableAlerts
+            alert("SELL Breakfast M5 Strict Breakout", alert.freq_once_per_bar_close)
+
+        b_done := true
+
+// =======================================================
+// LUNCH SIGNAL
+// =======================================================
+if isM5Chart and condL and not l_done and not na(l_high) and not na(l_low)
+    l_range = l_high - l_low
+
+    buyBreakL  = m5_low > l_high
+    sellBreakL = m5_high < l_low
+
+    if buyBreakL and trendBuyOK
+        entry = m5_close
+        sl    = l_low
+        tp1   = entry + l_range * tp1RR
+        tp2   = entry + l_range * tp2RR
+
+        label.new(bar_index, low, "BUY\nLUNCH\nM5", style=label.style_label_up, color=i_col_buy, textcolor=color.white)
+
+        drawTPSL(true, entry, sl, tp1, tp2, "L BUY")
+
+        if enableAlerts
+            alert("BUY Lunch M5 Strict Breakout", alert.freq_once_per_bar_close)
+
+        l_done := true
+
+    else if sellBreakL and trendSellOK
+        entry = m5_close
+        sl    = l_high
+        tp1   = entry - l_range * tp1RR
+        tp2   = entry - l_range * tp2RR
+
+        label.new(bar_index, high, "SELL\nLUNCH\nM5", style=label.style_label_down, color=i_col_sell, textcolor=color.white)
+
+        drawTPSL(false, entry, sl, tp1, tp2, "L SELL")
+
+        if enableAlerts
+            alert("SELL Lunch M5 Strict Breakout", alert.freq_once_per_bar_close)
+
+        l_done := true
+
+// =======================================================
+// DINNER SIGNAL
+// =======================================================
+if isM5Chart and condD and not d_done and not na(d_high) and not na(d_low)
+    d_range = d_high - d_low
+
+    buyBreakD  = m5_low > d_high
+    sellBreakD = m5_high < d_low
+
+    if buyBreakD and trendBuyOK
+        entry = m5_close
+        sl    = d_low
+        tp1   = entry + d_range * tp1RR
+        tp2   = entry + d_range * tp2RR
+
+        label.new(bar_index, low, "BUY\nDINNER\nM5", style=label.style_label_up, color=i_col_buy, textcolor=color.white)
+
+        drawTPSL(true, entry, sl, tp1, tp2, "D BUY")
+
+        if enableAlerts
+            alert("BUY Dinner M5 Strict Breakout", alert.freq_once_per_bar_close)
+
+        d_done := true
+
+    else if sellBreakD and trendSellOK
+        entry = m5_close
+        sl    = d_high
+        tp1   = entry - d_range * tp1RR
+        tp2   = entry - d_range * tp2RR
+
+        label.new(bar_index, high, "SELL\nDINNER\nM5", style=label.style_label_down, color=i_col_sell, textcolor=color.white)
+
+        drawTPSL(false, entry, sl, tp1, tp2, "D SELL")
+
+        if enableAlerts
+            alert("SELL Dinner M5 Strict Breakout", alert.freq_once_per_bar_close)
+
+        d_done := true
+
+// =======================================================
+// AUTO FIB PRO
+// =======================================================
+
+htfHigh = request.security(syminfo.tickerid, fibTF, ta.pivothigh(high, fibPivotLen, fibPivotLen))
+htfLow  = request.security(syminfo.tickerid, fibTF, ta.pivotlow(low, fibPivotLen, fibPivotLen))
+
+htfHighTime = request.security(
+     syminfo.tickerid,
+     fibTF,
+     not na(ta.pivothigh(high, fibPivotLen, fibPivotLen)) ? time[fibPivotLen] : na)
+
+htfLowTime = request.security(
+     syminfo.tickerid,
+     fibTF,
+     not na(ta.pivotlow(low, fibPivotLen, fibPivotLen)) ? time[fibPivotLen] : na)
+
+var float lastHigh = na
+var float lastLow = na
+var int lastHighTime = na
+var int lastLowTime = na
+
+if not na(htfHigh)
+    lastHigh := htfHigh
+    lastHighTime := int(htfHighTime)
+
+if not na(htfLow)
+    lastLow := htfLow
+    lastLowTime := int(htfLowTime)
+
+haveSwing = not na(lastHigh) and not na(lastLow) and not na(lastHighTime) and not na(lastLowTime)
+
+isUp   = haveSwing and lastHighTime > lastLowTime
+isDown = haveSwing and lastLowTime > lastHighTime
+
+start     = isUp ? lastLow : isDown ? lastHigh : na
+end       = isUp ? lastHigh : isDown ? lastLow : na
+startTime = isUp ? lastLowTime : isDown ? lastHighTime : na
+
+fibRange = haveSwing ? math.abs(end - start) : na
+futureTime = startTime + int((time - startTime) * 1.3)
+
+fib0   = end
+fib236 = isUp ? end - fibRange * 0.236 : end + fibRange * 0.236
+fib382 = isUp ? end - fibRange * 0.382 : end + fibRange * 0.382
+fib500 = isUp ? end - fibRange * 0.5   : end + fibRange * 0.5
+fib618 = isUp ? end - fibRange * 0.618 : end + fibRange * 0.618
+fib786 = isUp ? end - fibRange * 0.786 : end + fibRange * 0.786
+fib1   = start
+
+var line l0 = na
+var line l236 = na
+var line l382 = na
+var line l500 = na
+var line l618 = na
+var line l786 = na
+var line l1 = na
+
+var label lb0 = na
+var label lb236 = na
+var label lb382 = na
+var label lb500 = na
+var label lb618 = na
+var label lb786 = na
+var label lb1 = na
+
+deleteFib() =>
+    line.delete(l0)
+    line.delete(l236)
+    line.delete(l382)
+    line.delete(l500)
+    line.delete(l618)
+    line.delete(l786)
+    line.delete(l1)
+
+    label.delete(lb0)
+    label.delete(lb236)
+    label.delete(lb382)
+    label.delete(lb500)
+    label.delete(lb618)
+    label.delete(lb786)
+    label.delete(lb1)
+
+if barstate.islast
+    if not showFib
+        deleteFib()
+
+    if showFib and haveSwing
+        deleteFib()
+
+        l0   := line.new(startTime, fib0,   futureTime, fib0,   xloc=xloc.bar_time, color=color.gray)
+        l236 := line.new(startTime, fib236, futureTime, fib236, xloc=xloc.bar_time, color=color.gray)
+        l382 := line.new(startTime, fib382, futureTime, fib382, xloc=xloc.bar_time, color=color.gray)
+        l500 := line.new(startTime, fib500, futureTime, fib500, xloc=xloc.bar_time, color=color.gray)
+        l618 := line.new(startTime, fib618, futureTime, fib618, xloc=xloc.bar_time, color=color.orange, width=2)
+        l786 := line.new(startTime, fib786, futureTime, fib786, xloc=xloc.bar_time, color=color.gray)
+        l1   := line.new(startTime, fib1,   futureTime, fib1,   xloc=xloc.bar_time, color=color.gray)
+
+        lb0   := label.new(futureTime, fib0,   "0",     xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+        lb236 := label.new(futureTime, fib236, "23.6",  xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+        lb382 := label.new(futureTime, fib382, "38.2",  xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+        lb500 := label.new(futureTime, fib500, "50.0",  xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+        lb618 := label.new(futureTime, fib618, "61.8",  xloc=xloc.bar_time, style=label.style_label_left, color=color.orange, textcolor=color.white)
+        lb786 := label.new(futureTime, fib786, "78.6",  xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+        lb1   := label.new(futureTime, fib1,   "100",   xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)

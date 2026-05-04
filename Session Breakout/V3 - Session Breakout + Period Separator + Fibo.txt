@@ -1,0 +1,158 @@
+//@version=5
+indicator("Breakout Pagi FINAL (12PM Box + M5 Strict + Fibo PRO)", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ── SETTINGS ─────────────────────────────────────────────
+i_tz        = input.string("Asia/Kuala_Lumpur", "Timezone")
+i_col_buy   = input.color(color.rgb(0, 230, 119, 75), "BUY Label")
+i_col_sell  = input.color(color.rgb(255, 82, 82, 69), "SELL Label")
+i_box_color = input.color(color.new(color.blue, 85), "Range Box")
+
+// ── FIB SETTINGS ─────────────────────────────────────────
+showFib     = input.bool(true, "Show Auto Fibonacci")
+fibTF       = input.timeframe("240", "Fibonacci TF")
+fibPivotLen = input.int(4)
+
+// ── TIME ────────────────────────────────────────────────
+bar_h = hour(time, i_tz)
+
+// =======================================================
+// 🔥 H1 DATA
+// =======================================================
+h1_high = request.security(syminfo.tickerid, "60", high)
+h1_low  = request.security(syminfo.tickerid, "60", low)
+h1_time = request.security(syminfo.tickerid, "60", time)
+
+h1_hour = hour(h1_time, i_tz)
+
+// =======================================================
+// 🔥 M5 DATA
+// =======================================================
+m5_high = request.security(syminfo.tickerid, "5", high)
+m5_low  = request.security(syminfo.tickerid, "5", low)
+
+// =======================================================
+// 🔥 STATE
+// =======================================================
+var float lvl_high = na
+var float lvl_low  = na
+var bool  sig_done = false
+var bool  box_ready = false
+var box   rangeBox = na
+var int   box_start_time = na
+
+// =======================================================
+// 🔄 RESET (6AM)
+// =======================================================
+if bar_h == 6
+    lvl_high := na
+    lvl_low  := na
+    sig_done := false
+    box_ready := false
+    box_start_time := time
+
+    if not na(rangeBox)
+        box.delete(rangeBox)
+
+// =======================================================
+// 📉 LOW = 6AM
+// =======================================================
+if h1_hour == 6 and not box_ready
+    lvl_low := h1_low
+
+// =======================================================
+// 📈 HIGH = MAX(7AM & 8AM)
+// =======================================================
+if (h1_hour == 7 or h1_hour == 8) and not box_ready
+    lvl_high := na(lvl_high) ? h1_high : math.max(lvl_high, h1_high)
+
+// =======================================================
+// 📦 LOCK BOX → EXTEND UNTIL 12PM
+// =======================================================
+if h1_hour == 8 and not box_ready and not na(lvl_high) and not na(lvl_low)
+    box_ready := true
+
+    if not na(rangeBox)
+        box.delete(rangeBox)
+
+    endTime = timestamp(i_tz, year(time, i_tz), month(time, i_tz), dayofmonth(time, i_tz), 18, 0)
+
+    rangeBox := box.new(box_start_time, lvl_high, endTime, lvl_low, xloc=xloc.bar_time, bgcolor=i_box_color)
+
+// =======================================================
+// 🔥 STRICT M5 BREAKOUT (FULL CANDLE)
+// =======================================================
+condStart = bar_h >= 9
+
+if condStart and box_ready and not sig_done
+    if m5_low > lvl_high
+        label.new(bar_index, low, "BUY M5", style=label.style_label_up, color=i_col_buy)
+        alert("BUY (Full M5 Candle Above Box)", alert.freq_once_per_bar_close)
+        sig_done := true
+    else if m5_high < lvl_low
+        label.new(bar_index, high, "SELL M5", style=label.style_label_down, color=i_col_sell)
+        alert("SELL (Full M5 Candle Below Box)", alert.freq_once_per_bar_close)
+        sig_done := true
+
+// =======================================================
+// 🔥 AUTO FIB PRO (EXACT)
+// =======================================================
+htfHigh = request.security(syminfo.tickerid, fibTF, ta.pivothigh(high, fibPivotLen, fibPivotLen))
+htfLow  = request.security(syminfo.tickerid, fibTF, ta.pivotlow(low, fibPivotLen, fibPivotLen))
+
+htfHighTime = request.security(syminfo.tickerid, fibTF,
+     not na(ta.pivothigh(high, fibPivotLen, fibPivotLen)) ? time[fibPivotLen] : na)
+
+htfLowTime = request.security(syminfo.tickerid, fibTF,
+     not na(ta.pivotlow(low, fibPivotLen, fibPivotLen)) ? time[fibPivotLen] : na)
+
+var float lastHigh = na
+var float lastLow = na
+var int lastHighTime = na
+var int lastLowTime = na
+
+if not na(htfHigh)
+    lastHigh := htfHigh
+    lastHighTime := int(htfHighTime)
+
+if not na(htfLow)
+    lastLow := htfLow
+    lastLowTime := int(htfLowTime)
+
+haveSwing = not na(lastHigh) and not na(lastLow) and not na(lastHighTime) and not na(lastLowTime)
+
+isUp   = haveSwing and lastHighTime > lastLowTime
+isDown = haveSwing and lastLowTime > lastHighTime
+
+start     = isUp ? lastLow : isDown ? lastHigh : na
+end       = isUp ? lastHigh : isDown ? lastLow : na
+startTime = isUp ? lastLowTime : isDown ? lastHighTime : na
+
+fibRange = haveSwing ? math.abs(end - start) : na
+futureTime = startTime + int((time - startTime) * 1.3)
+
+fib0   = end
+fib236 = isUp ? end - fibRange * 0.236 : end + fibRange * 0.236
+fib382 = isUp ? end - fibRange * 0.382 : end + fibRange * 0.382
+fib500 = isUp ? end - fibRange * 0.5   : end + fibRange * 0.5
+fib618 = isUp ? end - fibRange * 0.618 : end + fibRange * 0.618
+fib786 = isUp ? end - fibRange * 0.786 : end + fibRange * 0.786
+fib1   = start
+
+var line l0 = na
+var line l236 = na
+var line l382 = na
+var line l500 = na
+var line l618 = na
+var line l786 = na
+var line l1 = na
+
+if barstate.islast and showFib and haveSwing
+    line.delete(l0), line.delete(l236), line.delete(l382), line.delete(l500), line.delete(l618), line.delete(l786), line.delete(l1)
+
+    l0   := line.new(startTime, fib0,   futureTime, fib0,   xloc=xloc.bar_time)
+    l236 := line.new(startTime, fib236, futureTime, fib236, xloc=xloc.bar_time)
+    l382 := line.new(startTime, fib382, futureTime, fib382, xloc=xloc.bar_time)
+    l500 := line.new(startTime, fib500, futureTime, fib500, xloc=xloc.bar_time)
+    l618 := line.new(startTime, fib618, futureTime, fib618, xloc=xloc.bar_time, width=2)
+    l786 := line.new(startTime, fib786, futureTime, fib786, xloc=xloc.bar_time)
+    l1   := line.new(startTime, fib1,   futureTime, fib1,   xloc=xloc.bar_time)

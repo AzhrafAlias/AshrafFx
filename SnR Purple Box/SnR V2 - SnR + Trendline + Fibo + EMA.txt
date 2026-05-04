@@ -1,0 +1,570 @@
+//@version=6
+indicator("Ashraf All In One - MTF Fib + SBR RBS + Trendline + Hard Signals [SNR Pivot To Entry]", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=300)
+
+//=============================
+// INPUTS
+//=============================
+srPivotLen = input.int(3, "Minor Structure Pivot Length", minval=1)
+extendRight = input.bool(true, "Extend Latest S/R Right")
+showSupport = input.bool(true, "Show Latest Support")
+showResistance = input.bool(true, "Show Latest Resistance")
+showBullTrendline = input.bool(true, "Show Bullish Trendline")
+showBearTrendline = input.bool(true, "Show Bearish Trendline")
+showEntryLabels = input.bool(true, "Show Labels")
+showPivotMarkers = input.bool(false, "Show Pivot Markers")
+
+pivotLen = input.int(4, "Trendline Pivot Length", minval=1)
+trendlineTF = input.timeframe("240", "Trendline Timeframe")
+
+atrLen = input.int(14, "ATR Length", minval=1)
+breakBufferATR = input.float(0.01, "Breakout Buffer ATR", step=0.01, minval=0.0)
+slAtrMult = input.float(0.20, "SL Buffer ATR", step=0.05, minval=0.0)
+
+useRSIFilter = input.bool(false, "Use RSI Filter")
+rsiLen = input.int(14, "RSI Length", minval=1)
+rsiBuyMin = input.float(45.0, "RSI Min For Buy", step=0.1)
+rsiSellMax = input.float(55.0, "RSI Max For Sell", step=0.1)
+
+useMAFilter = input.bool(true, "Use EMA Trend Filter")
+emaFastLen = input.int(20, "Fast EMA", minval=1)
+emaSlowLen = input.int(50, "Slow EMA", minval=1)
+
+showSL = input.bool(true, "Show Suggested SL")
+keepBrokenLevelBars = input.int(20, "Max Retest Bars", minval=1)
+minBreakCandles = input.int(1, "Min Bars After Break Before Retest", minval=1)
+
+// Fibonacci MTF
+showFib = input.bool(true, "Show Auto Fibonacci")
+showFibLabels = input.bool(true, "Show Fib Labels")
+fibTF = input.timeframe("240", "Fibonacci Timeframe")
+fibPivotLen = input.int(4, "Fib Pivot Length", minval=1)
+useFibFilter = input.bool(true, "Use Fib Confluence For Hard Signals")
+fibBufferATR = input.float(0.15, "Fib Confluence Buffer ATR", step=0.01, minval=0.0)
+useFib382 = input.bool(false, "Use Fib 0.382")
+useFib500 = input.bool(true, "Use Fib 0.500")
+useFib618 = input.bool(true, "Use Fib 0.618")
+useFib786 = input.bool(false, "Use Fib 0.786")
+
+// Broken zone
+showBrokenZones = input.bool(true, "Show Broken SNR Boxes On Valid Signal Only")
+zoneATRMult = input.float(0.35, "Zone Thickness ATR", step=0.05, minval=0.05)
+zoneBullColor = input.color(color.new(color.purple, 75), "Bullish Broken Zone Color")
+zoneBearColor = input.color(color.new(color.purple, 75), "Bearish Broken Zone Color")
+zoneBorderColor = input.color(color.new(color.purple, 20), "Zone Border Color")
+
+// Alert settings
+alertOnBarCloseOnly = input.bool(true, "Alert On Bar Close Only")
+
+//=============================
+// CORE DATA
+//=============================
+atr = ta.atr(atrLen)
+breakBuffer = atr * breakBufferATR
+slBuffer = atr * slAtrMult
+fibBuffer = atr * fibBufferATR
+zoneHalf = atr * zoneATRMult
+
+rsi = ta.rsi(close, rsiLen)
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+//=============================
+// MINOR STRUCTURE S/R - PIVOT BASED
+//=============================
+srPH = ta.pivothigh(high, srPivotLen, srPivotLen)
+srPL = ta.pivotlow(low, srPivotLen, srPivotLen)
+
+srPHBar = bar_index - srPivotLen
+srPLBar = bar_index - srPivotLen
+
+var float latestResistance = na
+var int latestResistanceBar = na
+var float latestSupport = na
+var int latestSupportBar = na
+
+if not na(srPH)
+    latestResistance := srPH
+    latestResistanceBar := srPHBar
+
+if not na(srPL)
+    latestSupport := srPL
+    latestSupportBar := srPLBar
+
+var line latestResistanceLine = na
+var line latestSupportLine = na
+
+if not na(latestResistanceLine)
+    line.delete(latestResistanceLine)
+if not na(latestSupportLine)
+    line.delete(latestSupportLine)
+
+if showResistance and not na(latestResistance) and not na(latestResistanceBar)
+    latestResistanceLine := line.new(latestResistanceBar, latestResistance, bar_index, latestResistance, extend=extendRight ? extend.right : extend.none, color=color.red, width=2)
+
+if showSupport and not na(latestSupport) and not na(latestSupportBar)
+    latestSupportLine := line.new(latestSupportBar, latestSupport, bar_index, latestSupport, extend=extendRight ? extend.right : extend.none, color=color.lime, width=2)
+
+//=============================
+// PIVOTS FOR TRENDLINE - ALWAYS FROM HTF
+//=============================
+htfPH = request.security(syminfo.tickerid, trendlineTF, ta.pivothigh(high, pivotLen, pivotLen), lookahead=barmerge.lookahead_off)
+htfPL = request.security(syminfo.tickerid, trendlineTF, ta.pivotlow(low, pivotLen, pivotLen), lookahead=barmerge.lookahead_off)
+
+htfPHTime = request.security(syminfo.tickerid, trendlineTF, not na(ta.pivothigh(high, pivotLen, pivotLen)) ? time[pivotLen] : na, lookahead=barmerge.lookahead_off)
+htfPLTime = request.security(syminfo.tickerid, trendlineTF, not na(ta.pivotlow(low, pivotLen, pivotLen)) ? time[pivotLen] : na, lookahead=barmerge.lookahead_off)
+
+var float prevPHPrice = na
+var float lastPHPrice = na
+var int prevPHTime = na
+var int lastPHTime = na
+
+var float prevPLPrice = na
+var float lastPLPrice = na
+var int prevPLTime = na
+var int lastPLTime = na
+
+var line bullTrendline = na
+var line bearTrendline = na
+
+newHTFPH = not na(htfPH) and not na(htfPHTime) and (na(lastPHTime) or int(htfPHTime) != lastPHTime)
+newHTFPL = not na(htfPL) and not na(htfPLTime) and (na(lastPLTime) or int(htfPLTime) != lastPLTime)
+
+if newHTFPH
+    prevPHPrice := lastPHPrice
+    prevPHTime := lastPHTime
+    lastPHPrice := htfPH
+    lastPHTime := int(htfPHTime)
+    if showBearTrendline and not na(prevPHPrice) and not na(prevPHTime)
+        if not na(bearTrendline)
+            line.delete(bearTrendline)
+        bearTrendline := line.new(prevPHTime, prevPHPrice, lastPHTime, lastPHPrice, xloc=xloc.bar_time, extend=extend.right, color=color.orange, width=2)
+
+if newHTFPL
+    prevPLPrice := lastPLPrice
+    prevPLTime := lastPLTime
+    lastPLPrice := htfPL
+    lastPLTime := int(htfPLTime)
+    if showBullTrendline and not na(prevPLPrice) and not na(prevPLTime)
+        if not na(bullTrendline)
+            line.delete(bullTrendline)
+        bullTrendline := line.new(prevPLTime, prevPLPrice, lastPLTime, lastPLPrice, xloc=xloc.bar_time, extend=extend.right, color=color.aqua, width=2)
+
+//=============================
+// TRENDLINE PRICE FUNCTIONS
+//=============================
+f_line_price_now(_line) =>
+    x1 = line.get_x1(_line)
+    y1 = line.get_y1(_line)
+    x2 = line.get_x2(_line)
+    y2 = line.get_y2(_line)
+    dx = x2 - x1
+    dx == 0 ? y2 : y1 + (y2 - y1) * (time - x1) / dx
+
+f_line_price_prev(_line) =>
+    x1 = line.get_x1(_line)
+    y1 = line.get_y1(_line)
+    x2 = line.get_x2(_line)
+    y2 = line.get_y2(_line)
+    dx = x2 - x1
+    dx == 0 ? y2 : y1 + (y2 - y1) * (time[1] - x1) / dx
+
+bearTLNow = not na(bearTrendline) ? f_line_price_now(bearTrendline) : na
+bearTLPrev = not na(bearTrendline) ? f_line_price_prev(bearTrendline) : na
+bullTLNow = not na(bullTrendline) ? f_line_price_now(bullTrendline) : na
+bullTLPrev = not na(bullTrendline) ? f_line_price_prev(bullTrendline) : na
+
+//=============================
+// HELPER FUNCTIONS
+//=============================
+f_breaks_above(_level) =>
+    not na(_level) and close > (_level + breakBuffer) and close[1] <= (_level + breakBuffer)
+
+f_breaks_below(_level) =>
+    not na(_level) and close < (_level - breakBuffer) and close[1] >= (_level - breakBuffer)
+
+f_near_level(_price, _level, _buf) =>
+    not na(_price) and not na(_level) and math.abs(_price - _level) <= _buf
+
+f_bull_retest_in_zone_strict(_top, _bot) =>
+    touchedInside = low <= _top and low >= _bot
+    bullishBody = close > open
+    closeAboveBot = close >= _bot
+    lowerWick = math.min(open, close) - low
+    bodySize = math.abs(close - open)
+    wickOk = lowerWick >= bodySize * 0.2
+    touchedInside and bullishBody and closeAboveBot and wickOk
+
+f_bear_retest_in_zone_strict(_top, _bot) =>
+    touchedInside = high >= _bot and high <= _top
+    bearishBody = close < open
+    closeBelowTop = close <= _top
+    upperWick = high - math.max(open, close)
+    bodySize = math.abs(close - open)
+    wickOk = upperWick >= bodySize * 0.2
+    touchedInside and bearishBody and closeBelowTop and wickOk
+
+f_bull_retest_ok(_level) =>
+    touched = low <= _level
+    heldAbove = close >= _level
+    bullishBody = close > open
+    lowerWick = math.min(open, close) - low
+    bodySize = math.abs(close - open)
+    wickOk = lowerWick >= bodySize * 0.2
+    touched and heldAbove and bullishBody and wickOk
+
+f_bear_retest_ok(_level) =>
+    touched = high >= _level
+    heldBelow = close <= _level
+    bearishBody = close < open
+    upperWick = high - math.max(open, close)
+    bodySize = math.abs(close - open)
+    wickOk = upperWick >= bodySize * 0.2
+    touched and heldBelow and bearishBody and wickOk
+
+//=============================
+// BROKEN SNR MEMORY - ARM ONLY
+// start bar ikut pivot asal, bukan breakout bar
+//=============================
+var float armedBullLevel = na
+var float armedBullTop = na
+var float armedBullBot = na
+var int armedBullBreakBar = na
+var int armedBullStartBar = na
+var bool waitBullRetest = false
+
+var float armedBearLevel = na
+var float armedBearTop = na
+var float armedBearBot = na
+var int armedBearBreakBar = na
+var int armedBearStartBar = na
+var bool waitBearRetest = false
+
+resistanceBrokenUp = f_breaks_above(latestResistance)
+supportBrokenDown = f_breaks_below(latestSupport)
+
+if resistanceBrokenUp
+    armedBullLevel := latestResistance
+    armedBullTop := latestResistance + zoneHalf
+    armedBullBot := latestResistance - zoneHalf
+    armedBullBreakBar := bar_index
+    armedBullStartBar := latestResistanceBar
+    waitBullRetest := true
+
+if supportBrokenDown
+    armedBearLevel := latestSupport
+    armedBearTop := latestSupport + zoneHalf
+    armedBearBot := latestSupport - zoneHalf
+    armedBearBreakBar := bar_index
+    armedBearStartBar := latestSupportBar
+    waitBearRetest := true
+
+if waitBullRetest and not na(armedBullBreakBar) and (bar_index - armedBullBreakBar > keepBrokenLevelBars)
+    waitBullRetest := false
+    armedBullLevel := na
+    armedBullTop := na
+    armedBullBot := na
+    armedBullBreakBar := na
+    armedBullStartBar := na
+
+if waitBearRetest and not na(armedBearBreakBar) and (bar_index - armedBearBreakBar > keepBrokenLevelBars)
+    waitBearRetest := false
+    armedBearLevel := na
+    armedBearTop := na
+    armedBearBot := na
+    armedBearBreakBar := na
+    armedBearStartBar := na
+
+bullBarsPassedOk = waitBullRetest and not na(armedBullBreakBar) and (bar_index - armedBullBreakBar >= minBreakCandles)
+bearBarsPassedOk = waitBearRetest and not na(armedBearBreakBar) and (bar_index - armedBearBreakBar >= minBreakCandles)
+
+//=============================
+// TRENDLINE BREAKOUT → ARM RETEST
+// TL logic masih dikira di background, tapi signal TL dimatikan
+//=============================
+var float brokenBearTLForBuy = na
+var int brokenBearTLBar = na
+var bool waitBuyTLRetest = false
+
+var float brokenBullTLForSell = na
+var int brokenBullTLBar = na
+var bool waitSellTLRetest = false
+
+bearTrendlineBrokenUp = not na(bearTLNow) and not na(bearTLPrev) and close > (bearTLNow + breakBuffer) and close[1] <= (bearTLPrev + breakBuffer)
+bullTrendlineBrokenDown = not na(bullTLNow) and not na(bullTLPrev) and close < (bullTLNow - breakBuffer) and close[1] >= (bullTLPrev - breakBuffer)
+
+if bearTrendlineBrokenUp
+    brokenBearTLForBuy := bearTLNow
+    brokenBearTLBar := bar_index
+    waitBuyTLRetest := true
+
+if bullTrendlineBrokenDown
+    brokenBullTLForSell := bullTLNow
+    brokenBullTLBar := bar_index
+    waitSellTLRetest := true
+
+if waitBuyTLRetest and not na(brokenBearTLBar) and (bar_index - brokenBearTLBar > keepBrokenLevelBars)
+    waitBuyTLRetest := false
+    brokenBearTLForBuy := na
+    brokenBearTLBar := na
+
+if waitSellTLRetest and not na(brokenBullTLBar) and (bar_index - brokenBullTLBar > keepBrokenLevelBars)
+    waitSellTLRetest := false
+    brokenBullTLForSell := na
+    brokenBullTLBar := na
+
+buyTLBarsPassedOk = waitBuyTLRetest and not na(brokenBearTLBar) and (bar_index - brokenBearTLBar >= minBreakCandles)
+sellTLBarsPassedOk = waitSellTLRetest and not na(brokenBullTLBar) and (bar_index - brokenBullTLBar >= minBreakCandles)
+
+//=============================
+// FILTERS
+//=============================
+buyRsiOk = not useRSIFilter or rsi >= rsiBuyMin
+sellRsiOk = not useRSIFilter or rsi <= rsiSellMax
+buyMaOk = not useMAFilter or emaFast > emaSlow
+sellMaOk = not useMAFilter or emaFast < emaSlow
+
+//=============================
+// BOX RETEST ENTRY - STRICT
+//=============================
+buyRetest = bullBarsPassedOk and not na(armedBullTop) and not na(armedBullBot) and f_bull_retest_in_zone_strict(armedBullTop, armedBullBot)
+sellRetest = bearBarsPassedOk and not na(armedBearTop) and not na(armedBearBot) and f_bear_retest_in_zone_strict(armedBearTop, armedBearBot)
+
+//=============================
+// TRENDLINE RETEST ENTRY
+//=============================
+buyTLRetest = buyTLBarsPassedOk and not na(brokenBearTLForBuy) and f_bull_retest_ok(brokenBearTLForBuy)
+sellTLRetest = sellTLBarsPassedOk and not na(brokenBullTLForSell) and f_bear_retest_ok(brokenBullTLForSell)
+
+//=============================
+// HTF FIBONACCI
+//=============================
+htfPivotHigh = request.security(syminfo.tickerid, fibTF, ta.pivothigh(high, fibPivotLen, fibPivotLen), lookahead=barmerge.lookahead_off)
+htfPivotLow = request.security(syminfo.tickerid, fibTF, ta.pivotlow(low, fibPivotLen, fibPivotLen), lookahead=barmerge.lookahead_off)
+htfPivotHighTime = request.security(syminfo.tickerid, fibTF, not na(ta.pivothigh(high, fibPivotLen, fibPivotLen)) ? time[fibPivotLen] : na, lookahead=barmerge.lookahead_off)
+htfPivotLowTime = request.security(syminfo.tickerid, fibTF, not na(ta.pivotlow(low, fibPivotLen, fibPivotLen)) ? time[fibPivotLen] : na, lookahead=barmerge.lookahead_off)
+
+var float lastHTFHigh = na
+var int lastHTFHighTime = na
+var float lastHTFLow = na
+var int lastHTFLowTime = na
+
+newHTFHigh = not na(htfPivotHigh) and (na(lastHTFHighTime) or htfPivotHighTime != lastHTFHighTime)
+newHTFLow = not na(htfPivotLow) and (na(lastHTFLowTime) or htfPivotLowTime != lastHTFLowTime)
+
+if newHTFHigh
+    lastHTFHigh := htfPivotHigh
+    lastHTFHighTime := int(htfPivotHighTime)
+
+if newHTFLow
+    lastHTFLow := htfPivotLow
+    lastHTFLowTime := int(htfPivotLowTime)
+
+haveHTFSwing = not na(lastHTFHigh) and not na(lastHTFLow) and not na(lastHTFHighTime) and not na(lastHTFLowTime)
+isHTFUpSwing = haveHTFSwing and lastHTFHighTime > lastHTFLowTime
+isHTFDownSwing = haveHTFSwing and lastHTFLowTime > lastHTFHighTime
+
+htfSwingStart = isHTFUpSwing ? lastHTFLow : isHTFDownSwing ? lastHTFHigh : na
+htfSwingEnd = isHTFUpSwing ? lastHTFHigh : isHTFDownSwing ? lastHTFLow : na
+htfSwingStartTime = isHTFUpSwing ? lastHTFLowTime : isHTFDownSwing ? lastHTFHighTime : na
+htfSwingEndTime = isHTFUpSwing ? lastHTFHighTime : isHTFDownSwing ? lastHTFLowTime : na
+htfSwingRange = haveHTFSwing ? math.abs(htfSwingEnd - htfSwingStart) : na
+
+fib0 = isHTFUpSwing ? htfSwingEnd : isHTFDownSwing ? htfSwingEnd : na
+fib236 = isHTFUpSwing ? htfSwingEnd - htfSwingRange * 0.236 : isHTFDownSwing ? htfSwingEnd + htfSwingRange * 0.236 : na
+fib382 = isHTFUpSwing ? htfSwingEnd - htfSwingRange * 0.382 : isHTFDownSwing ? htfSwingEnd + htfSwingRange * 0.382 : na
+fib500 = isHTFUpSwing ? htfSwingEnd - htfSwingRange * 0.500 : isHTFDownSwing ? htfSwingEnd + htfSwingRange * 0.500 : na
+fib618 = isHTFUpSwing ? htfSwingEnd - htfSwingRange * 0.618 : isHTFDownSwing ? htfSwingEnd + htfSwingRange * 0.618 : na
+fib786 = isHTFUpSwing ? htfSwingEnd - htfSwingRange * 0.786 : isHTFDownSwing ? htfSwingEnd + htfSwingRange * 0.786 : na
+fib1 = isHTFUpSwing ? htfSwingStart : isHTFDownSwing ? htfSwingStart : na
+
+fibBuyConfluence = useFibFilter and isHTFUpSwing and ((useFib382 and f_near_level(close, fib382, fibBuffer)) or (useFib500 and f_near_level(close, fib500, fibBuffer)) or (useFib618 and f_near_level(close, fib618, fibBuffer)) or (useFib786 and f_near_level(close, fib786, fibBuffer)))
+fibSellConfluence = useFibFilter and isHTFDownSwing and ((useFib382 and f_near_level(close, fib382, fibBuffer)) or (useFib500 and f_near_level(close, fib500, fibBuffer)) or (useFib618 and f_near_level(close, fib618, fibBuffer)) or (useFib786 and f_near_level(close, fib786, fibBuffer)))
+
+//=============================
+// RAW SIGNALS
+//=============================
+preBuyBase = buyRetest and buyRsiOk and buyMaOk
+preSellBase = sellRetest and sellRsiOk and sellMaOk
+
+// TL dimatikan terus
+preBuyTLBase = false
+preSellTLBase = false
+
+//=============================
+// HARD SIGNAL LOGIC
+//=============================
+buyCount = (preBuyBase ? 1 : 0) + (preBuyTLBase ? 1 : 0) + (fibBuyConfluence ? 1 : 0)
+sellCount = (preSellBase ? 1 : 0) + (preSellTLBase ? 1 : 0) + (fibSellConfluence ? 1 : 0)
+
+hardBuyNow = buyCount >= 2 and sellCount == 0
+hardSellNow = sellCount >= 2 and buyCount == 0
+
+preBuyNow = preBuyBase and not hardBuyNow and not hardSellNow and not (preSellBase or preSellTLBase)
+preBuyTLNow = false
+preSellNow = preSellBase and not hardBuyNow and not hardSellNow and not (preBuyBase or preBuyTLBase)
+preSellTLNow = false
+
+//=============================
+// SIGNAL BOX ONLY WHEN SIGNAL VALID
+// left side start dari pivot SNR asal
+// right side end pada candle entry
+//=============================
+var box lastBullSignalBox = na
+var box lastBearSignalBox = na
+
+if showBrokenZones and (preBuyNow or hardBuyNow) and not na(armedBullTop) and not na(armedBullBot) and not na(armedBullStartBar)
+    lastBullSignalBox := box.new(armedBullStartBar, armedBullTop, bar_index, armedBullBot, bgcolor=zoneBullColor, border_color=zoneBorderColor, extend=extend.none)
+
+if showBrokenZones and (preSellNow or hardSellNow) and not na(armedBearTop) and not na(armedBearBot) and not na(armedBearStartBar)
+    lastBearSignalBox := box.new(armedBearStartBar, armedBearTop, bar_index, armedBearBot, bgcolor=zoneBearColor, border_color=zoneBorderColor, extend=extend.none)
+
+//=============================
+// SL LEVELS
+//=============================
+buySLLevel = not na(armedBullBot) ? armedBullBot : brokenBearTLForBuy
+sellSLLevel = not na(armedBearTop) ? armedBearTop : brokenBullTLForSell
+
+buySL = (hardBuyNow or preBuyNow or preBuyTLNow) and not na(buySLLevel) ? buySLLevel - slBuffer : na
+sellSL = (hardSellNow or preSellNow or preSellTLNow) and not na(sellSLLevel) ? sellSLLevel + slBuffer : na
+
+//=============================
+// RESET ARMED SNR AFTER SIGNAL
+//=============================
+if preBuyNow or hardBuyNow
+    waitBullRetest := false
+    armedBullLevel := na
+    armedBullTop := na
+    armedBullBot := na
+    armedBullBreakBar := na
+    armedBullStartBar := na
+
+if preSellNow or hardSellNow
+    waitBearRetest := false
+    armedBearLevel := na
+    armedBearTop := na
+    armedBearBot := na
+    armedBearBreakBar := na
+    armedBearStartBar := na
+
+if preBuyTLNow or hardBuyNow
+    waitBuyTLRetest := false
+    brokenBearTLForBuy := na
+    brokenBearTLBar := na
+
+if preSellTLNow or hardSellNow
+    waitSellTLRetest := false
+    brokenBullTLForSell := na
+    brokenBullTLBar := na
+
+//=============================
+// DRAW HTF FIB
+//=============================
+var line fibLine0 = na
+var line fibLine236 = na
+var line fibLine382 = na
+var line fibLine500 = na
+var line fibLine618 = na
+var line fibLine786 = na
+var line fibLine1 = na
+var line fibSwingLine = na
+
+var label fibLabel0 = na
+var label fibLabel236 = na
+var label fibLabel382 = na
+var label fibLabel500 = na
+var label fibLabel618 = na
+var label fibLabel786 = na
+var label fibLabel1 = na
+
+if barstate.islast
+    if not na(fibLine0)
+        line.delete(fibLine0)
+    if not na(fibLine236)
+        line.delete(fibLine236)
+    if not na(fibLine382)
+        line.delete(fibLine382)
+    if not na(fibLine500)
+        line.delete(fibLine500)
+    if not na(fibLine618)
+        line.delete(fibLine618)
+    if not na(fibLine786)
+        line.delete(fibLine786)
+    if not na(fibLine1)
+        line.delete(fibLine1)
+    if not na(fibSwingLine)
+        line.delete(fibSwingLine)
+    if not na(fibLabel0)
+        label.delete(fibLabel0)
+    if not na(fibLabel236)
+        label.delete(fibLabel236)
+    if not na(fibLabel382)
+        label.delete(fibLabel382)
+    if not na(fibLabel500)
+        label.delete(fibLabel500)
+    if not na(fibLabel618)
+        label.delete(fibLabel618)
+    if not na(fibLabel786)
+        label.delete(fibLabel786)
+    if not na(fibLabel1)
+        label.delete(fibLabel1)
+
+    if haveHTFSwing and showFib
+        fibSwingLine := line.new(htfSwingStartTime, htfSwingStart, htfSwingEndTime, htfSwingEnd, xloc=xloc.bar_time, extend=extend.none, color=color.white, width=2)
+        fibLine0 := line.new(htfSwingStartTime, fib0, time, fib0, xloc=xloc.bar_time, extend=extend.right, color=color.gray, width=1)
+        fibLine236 := line.new(htfSwingStartTime, fib236, time, fib236, xloc=xloc.bar_time, extend=extend.right, color=color.orange, width=1)
+        fibLine382 := line.new(htfSwingStartTime, fib382, time, fib382, xloc=xloc.bar_time, extend=extend.right, color=color.yellow, width=1)
+        fibLine500 := line.new(htfSwingStartTime, fib500, time, fib500, xloc=xloc.bar_time, extend=extend.right, color=color.blue, width=1)
+        fibLine618 := line.new(htfSwingStartTime, fib618, time, fib618, xloc=xloc.bar_time, extend=extend.right, color=color.green, width=2)
+        fibLine786 := line.new(htfSwingStartTime, fib786, time, fib786, xloc=xloc.bar_time, extend=extend.right, color=color.purple, width=1)
+        fibLine1 := line.new(htfSwingStartTime, fib1, time, fib1, xloc=xloc.bar_time, extend=extend.right, color=color.gray, width=1)
+
+        if showFibLabels
+            fibLabel0 := label.new(time, fib0, "0.000", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.gray, 70))
+            fibLabel236 := label.new(time, fib236, "0.236", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.orange, 70))
+            fibLabel382 := label.new(time, fib382, "0.382", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.yellow, 70))
+            fibLabel500 := label.new(time, fib500, "0.500", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.blue, 70))
+            fibLabel618 := label.new(time, fib618, "0.618", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.green, 70))
+            fibLabel786 := label.new(time, fib786, "0.786", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.purple, 70))
+            fibLabel1 := label.new(time, fib1, "1.000", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.gray, 70))
+
+//=============================
+// EMA PLOTS
+//=============================
+plot(useMAFilter ? emaFast : na, "EMA Fast", color=color.yellow, linewidth=1)
+plot(useMAFilter ? emaSlow : na, "EMA Slow", color=color.blue, linewidth=1)
+
+//=============================
+// PIVOT MARKERS
+//=============================
+plotshape(showPivotMarkers and not na(htfPH), title="Pivot High", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+plotshape(showPivotMarkers and not na(htfPL), title="Pivot Low", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(showPivotMarkers and not na(srPH), title="SNR Pivot High", style=shape.circle, location=location.abovebar, color=color.red, size=size.tiny, offset=-srPivotLen)
+plotshape(showPivotMarkers and not na(srPL), title="SNR Pivot Low", style=shape.circle, location=location.belowbar, color=color.lime, size=size.tiny, offset=-srPivotLen)
+
+//=============================
+// SIGNAL LABELS
+//=============================
+plotshape(showEntryLabels and preBuyNow, title="Pre Buy", text="Pre Buy", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.small)
+plotshape(false, title="Pre Buy TL", text="Pre Buy TL", style=shape.labelup, location=location.belowbar, color=color.teal, textcolor=color.white, size=size.small)
+plotshape(showEntryLabels and preSellNow, title="Pre Sell", text="Pre Sell", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.small)
+plotshape(false, title="Pre Sell TL", text="Pre Sell TL", style=shape.labeldown, location=location.abovebar, color=color.maroon, textcolor=color.white, size=size.small)
+plotshape(showEntryLabels and hardBuyNow, title="Hard Buy", text="Hard Buy", style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, size=size.normal)
+plotshape(showEntryLabels and hardSellNow, title="Hard Sell", text="Hard Sell", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.normal)
+
+plot(showSL ? buySL : na, title="Buy SL", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(showSL ? sellSL : na, title="Sell SL", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+
+//=============================
+// ALERTS - ANY ALERT() FUNCTION CALL
+//=============================
+canFireAlert = alertOnBarCloseOnly ? barstate.isconfirmed : (barstate.isrealtime or barstate.isconfirmed)
+
+if canFireAlert
+    if preBuyNow
+        alert("Pre Buy | " + syminfo.ticker + " | TF: " + timeframe.period + " | Price: " + str.tostring(close), alert.freq_once_per_bar_close)
+    if preSellNow
+        alert("Pre Sell | " + syminfo.ticker + " | TF: " + timeframe.period + " | Price: " + str.tostring(close), alert.freq_once_per_bar_close)
+    if hardBuyNow
+        alert("Hard Buy | " + syminfo.ticker + " | TF: " + timeframe.period + " | Price: " + str.tostring(close), alert.freq_once_per_bar_close)
+    if hardSellNow
+        alert("Hard Sell | " + syminfo.ticker + " | TF: " + timeframe.period + " | Price: " + str.tostring(close), alert.freq_once_per_bar_close)

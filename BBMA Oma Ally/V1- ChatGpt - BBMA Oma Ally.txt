@@ -1,0 +1,289 @@
+//@version=5
+indicator("BBMA OMA Ally - FINAL + BUY NOW / SELL NOW (TF+RE combined) | REV WickOnly + H1 | Auto Profile", overlay=true, max_labels_count=500)
+
+//====================================================
+// 0) Helper: symbol detection
+//====================================================
+sym = str.upper(syminfo.ticker)
+
+isGOLD = str.contains(sym, "GOLD") or str.contains(sym, "XAU")
+isGJ   = str.contains(sym, "GBPJPY") or (str.contains(sym, "GBP") and str.contains(sym, "JPY"))
+isGU   = str.contains(sym, "GBPUSD") or (str.contains(sym, "GBP") and str.contains(sym, "USD"))
+isGA   = str.contains(sym, "GBPAUD") or (str.contains(sym, "GBP") and str.contains(sym, "AUD"))
+isEJ   = str.contains(sym, "EURJPY") or (str.contains(sym, "EUR") and str.contains(sym, "JPY"))
+
+//====================================================
+// 1) Inputs
+//====================================================
+useAutoProfile = input.bool(true, "Auto-switch settings by symbol (recommended)")
+
+bbLen = input.int(20, "BB Period", minval=5)
+bbDev = input.float(2.0, "BB Deviation", minval=0.5, step=0.1)
+atrLen = input.int(14, "ATR Length", minval=5)
+
+useH1FilterTF  = input.bool(true,  "Use H1 Filter for TF")
+useH1FilterREV = input.bool(true,  "Use H1 Filter for REV")
+useBarCloseConfirm = input.bool(true, "Confirm on bar close (recommended)")
+
+tfLookaheadBars_manual = input.int(5, "TF (manual): Max bars after Momentum", minval=1)
+blockTFWhenBBFlat = input.bool(true, "Block TF when BB is flat (recommended)")
+useStrongCSMomentumFilter = input.bool(true, "TF: Strong CS Momentum when WMA5 is outside BB (recommended)")
+
+// REENTRY controls
+enableReentry = input.bool(true, "Enable REENTRY")
+reLookbackBars = input.int(10, "REENTRY: Momentum lookback bars", minval=1)
+reBlockWhenBBFlat = input.bool(true, "REENTRY: Block when BB flat (recommended)")
+reUseMA = input.string("MA10", "REENTRY: Touch MA", options=["MA5","MA10"])
+
+// BB Flat controls
+flatLookbackBars_manual = input.int(20, "BB Flat (manual): width avg lookback", minval=5)
+flatSlopeATR_manual = input.float(0.30, "BB Flat (manual): MidBB slope per bar <= ATR*x", minval=0.01, step=0.01)
+flatWidthATR_manual = input.float(3.0, "BB Flat (manual): Bandwidth <= ATR*x", minval=0.1, step=0.1)
+useWidthStable = input.bool(true, "BB Flat: require width not expanding fast")
+widthStablePct_manual = input.float(1.15, "BB Flat (manual): width <= avgWidth * factor", minval=1.0, step=0.05)
+
+// REV controls
+useMA5or10ForREV = input.string("MA5 OR MA10", "REV trigger MA", options=["MA10 only","MA5 only","MA5 OR MA10"])
+revRequireCloseBackInsideBB = input.bool(true, "REV: require close back inside BB")
+revRequireCandleColor       = input.bool(true, "REV: candle direction (buy green / sell red)")
+revRequireWickOnly          = input.bool(true, "REV: require WICK-only pierce outer BB (no body outside)")
+
+// Display controls
+showLegacyTFRE = input.bool(false, "Show legacy TF/RE labels (OFF recommended)")
+
+//====================================================
+// 2) Auto profile table
+//====================================================
+tfLookaheadBars_auto =
+     isGOLD ? 6 :
+     isGJ   ? 5 :
+     isGU   ? 5 :
+     isGA   ? 5 :
+     isEJ   ? 5 : 5
+
+flatSlopeATR_auto =
+     isGOLD ? 0.40 :
+     isGJ   ? 0.40 :
+     isGU   ? 0.30 :
+     isGA   ? 0.25 :
+     isEJ   ? 0.35 : 0.30
+
+flatWidthATR_auto =
+     isGOLD ? 4.5 :
+     isGJ   ? 4.0 :
+     isGU   ? 3.0 :
+     isGA   ? 2.6 :
+     isEJ   ? 3.5 : 3.0
+
+widthStablePct_auto =
+     isGOLD ? 1.20 :
+     isGJ   ? 1.20 :
+     isGU   ? 1.15 :
+     isGA   ? 1.12 :
+     isEJ   ? 1.18 : 1.15
+
+flatLookbackBars_auto = 20
+
+tfLookaheadBars = useAutoProfile ? tfLookaheadBars_auto : tfLookaheadBars_manual
+flatLookbackBars = useAutoProfile ? flatLookbackBars_auto : flatLookbackBars_manual
+flatSlopeATR     = useAutoProfile ? flatSlopeATR_auto     : flatSlopeATR_manual
+flatWidthATR     = useAutoProfile ? flatWidthATR_auto     : flatWidthATR_manual
+widthStablePct   = useAutoProfile ? widthStablePct_auto   : widthStablePct_manual
+
+//====================================================
+// 3) Indicators
+//====================================================
+midBB = ta.sma(close, bbLen)
+dev   = bbDev * ta.stdev(close, bbLen)
+upper = midBB + dev
+lower = midBB - dev
+
+ema50 = ta.ema(close, 50)
+
+ma5H  = ta.wma(high, 5)
+ma10H = ta.wma(high, 10)
+ma5L  = ta.wma(low, 5)
+ma10L = ta.wma(low, 10)
+
+atr = ta.atr(atrLen)
+
+//====================================================
+// 4) H1 filter (EMA50 + MidBB)
+//====================================================
+h1Close = request.security(syminfo.tickerid, "60", close)
+h1EMA50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+h1MidBB = request.security(syminfo.tickerid, "60", ta.sma(close, bbLen))
+h1Bull = h1Close > h1EMA50 and h1Close > h1MidBB
+h1Bear = h1Close < h1EMA50 and h1Close < h1MidBB
+
+allowBuyTF   = not useH1FilterTF  or h1Bull
+allowSellTF  = not useH1FilterTF  or h1Bear
+allowBuyREV  = not useH1FilterREV or h1Bull
+allowSellREV = not useH1FilterREV or h1Bear
+
+//====================================================
+// 5) BB Flat detection
+//====================================================
+midSlopePerBar = math.abs(midBB - midBB[1])
+bbWidth = (upper - lower)
+avgWidth = ta.sma(bbWidth, flatLookbackBars)
+widthStableOK = not useWidthStable or (bbWidth <= avgWidth * widthStablePct)
+
+bbFlat = (midSlopePerBar <= atr * flatSlopeATR) and (bbWidth <= atr * flatWidthATR) and widthStableOK
+tfAllowed = (not blockTFWhenBBFlat) or (not bbFlat)
+
+//====================================================
+// 6) Candle direction + body bounds
+//====================================================
+isBull = close > open
+isBear = close < open
+bodyHigh = math.max(open, close)
+bodyLow  = math.min(open, close)
+
+//====================================================
+// 7) TF logic
+//====================================================
+baseMomBuy  = allowBuyTF  and tfAllowed and close > upper and isBull
+baseMomSell = allowSellTF and tfAllowed and close < lower and isBear
+
+wma5LowOutside  = ma5L < lower
+wma5HighOutside = ma5H > upper
+
+momBuyStrongOK  = not useStrongCSMomentumFilter ? true : (not wma5HighOutside or close > ma5H)
+momSellStrongOK = not useStrongCSMomentumFilter ? true : (not wma5LowOutside  or close < ma5L)
+
+tfMomBuy  = baseMomBuy  and momBuyStrongOK
+tfMomSell = baseMomSell and momSellStrongOK
+
+var bool tfBuyPending  = false
+var bool tfSellPending = false
+var int  tfBuyStartBar = na
+var int  tfSellStartBar = na
+
+if tfMomBuy
+    tfBuyPending := true
+    tfBuyStartBar := bar_index
+
+if tfMomSell
+    tfSellPending := true
+    tfSellStartBar := bar_index
+
+tfBuyWindow  = tfBuyPending  and not na(tfBuyStartBar)  and (bar_index - tfBuyStartBar) >= 1 and (bar_index - tfBuyStartBar) <= tfLookaheadBars
+tfSellWindow = tfSellPending and not na(tfSellStartBar) and (bar_index - tfSellStartBar) >= 1 and (bar_index - tfSellStartBar) <= tfLookaheadBars
+
+tfBuyPierceRaw  = tfBuyWindow  and tfAllowed and (low  <= ma5L) and (bodyLow  > ma5L) and isBull
+tfSellPierceRaw = tfSellWindow and tfAllowed and (high >= ma5H) and (bodyHigh < ma5H) and isBear
+
+tfBuy  = useBarCloseConfirm ? (tfBuyPierceRaw  and barstate.isconfirmed) : tfBuyPierceRaw
+tfSell = useBarCloseConfirm ? (tfSellPierceRaw and barstate.isconfirmed) : tfSellPierceRaw
+
+if tfBuy
+    tfBuyPending := false
+if tfSell
+    tfSellPending := false
+
+if tfBuyPending and not na(tfBuyStartBar) and (bar_index - tfBuyStartBar) > tfLookaheadBars
+    tfBuyPending := false
+if tfSellPending and not na(tfSellStartBar) and (bar_index - tfSellStartBar) > tfLookaheadBars
+    tfSellPending := false
+
+//====================================================
+// 8) REV logic (unchanged)
+//====================================================
+maHiOut10 = ma10H > upper
+maLoOut10 = ma10L < lower
+maHiOut5  = ma5H  > upper
+maLoOut5  = ma5L  < lower
+
+maHiOut =
+     useMA5or10ForREV == "MA10 only" ? maHiOut10 :
+     useMA5or10ForREV == "MA5 only"  ? maHiOut5  :
+     (maHiOut5 or maHiOut10)
+
+maLoOut =
+     useMA5or10ForREV == "MA10 only" ? maLoOut10 :
+     useMA5or10ForREV == "MA5 only"  ? maLoOut5  :
+     (maLoOut5 or maLoOut10)
+
+revBuyWickOnly  = (low < lower)  and (bodyLow  >= lower)
+revSellWickOnly = (high > upper) and (bodyHigh <= upper)
+
+wickOnlyBuyOK  = not revRequireWickOnly or revBuyWickOnly
+wickOnlySellOK = not revRequireWickOnly or revSellWickOnly
+
+revBuyTrig  = allowBuyREV  and bbFlat and maLoOut and wickOnlyBuyOK
+revSellTrig = allowSellREV and bbFlat and maHiOut and wickOnlySellOK
+
+revBuyInsideOK  = not revRequireCloseBackInsideBB or (close > lower)
+revSellInsideOK = not revRequireCloseBackInsideBB or (close < upper)
+revBuyColorOK   = not revRequireCandleColor or isBull
+revSellColorOK  = not revRequireCandleColor or isBear
+
+revBuyRaw  = revBuyTrig  and revBuyInsideOK  and revBuyColorOK
+revSellRaw = revSellTrig and revSellInsideOK and revSellColorOK
+
+revBuy  = useBarCloseConfirm ? (revBuyRaw  and barstate.isconfirmed) : revBuyRaw
+revSell = useBarCloseConfirm ? (revSellRaw and barstate.isconfirmed) : revSellRaw
+
+//====================================================
+// 9) REENTRY logic
+//====================================================
+reMA_L = reUseMA == "MA5" ? ma5L : ma10L
+reMA_H = reUseMA == "MA5" ? ma5H : ma10H
+
+momBuyRecent  = ta.barssince(close > upper and isBull) <= reLookbackBars
+momSellRecent = ta.barssince(close < lower and isBear) <= reLookbackBars
+
+reAllowed = not reBlockWhenBBFlat or not bbFlat
+
+reBuyRaw = enableReentry and allowBuyTF and reAllowed and momBuyRecent and (low <= reMA_L) and (close > reMA_L) and isBull
+
+reSellRaw = enableReentry and allowSellTF and reAllowed and momSellRecent and (high >= reMA_H) and (close < reMA_H) and isBear
+
+reBuy  = useBarCloseConfirm ? (reBuyRaw  and barstate.isconfirmed) : reBuyRaw
+reSell = useBarCloseConfirm ? (reSellRaw and barstate.isconfirmed) : reSellRaw
+
+//====================================================
+// 10) BUY NOW / SELL NOW (combined)
+//====================================================
+buyNowRaw  = tfBuy or reBuy
+sellNowRaw = tfSell or reSell
+
+// (optional) avoid double-fire on same bar - already OR-combined, but keep clean:
+buyNow  = buyNowRaw
+sellNow = sellNowRaw
+
+//====================================================
+// 11) Plots
+//====================================================
+plot(upper, "BB Upper", color=color.new(color.black, 0))
+plot(midBB, "BB Mid",   color=color.new(color.gray, 0))
+plot(lower, "BB Lower", color=color.new(color.black, 0))
+plot(ema50, "EMA50", color=color.new(color.lime, 0))
+
+plot(ma5H,  "WMA5 High",  color=color.new(color.blue, 0))
+plot(ma10H, "WMA10 High", color=color.new(color.yellow, 0))
+plot(ma5L,  "WMA5 Low",   color=color.new(color.fuchsia, 0))
+plot(ma10L, "WMA10 Low",  color=color.new(color.white, 0))
+
+plotshape(bbFlat, title="BB Flat", style=shape.circle, location=location.top, size=size.tiny, color=color.new(color.gray, 70), text="FLAT")
+
+// Combined labels
+plotshape(buyNow,  title="BUY NOW",  style=shape.labelup,   location=location.belowbar, text="BUY NOW",  textcolor=color.white, color=color.new(color.green, 0), size=size.small)
+plotshape(sellNow, title="SELL NOW", style=shape.labeldown, location=location.abovebar, text="SELL NOW", textcolor=color.white, color=color.new(color.red, 0),   size=size.small)
+
+// Optional legacy labels
+plotshape(showLegacyTFRE and tfBuy,  title="TF Buy Entry",  style=shape.labelup,   location=location.belowbar, text="TF BUY",  textcolor=color.white, color=color.new(color.blue, 0), size=size.tiny)
+plotshape(showLegacyTFRE and tfSell, title="TF Sell Entry", style=shape.labeldown, location=location.abovebar, text="TF SELL", textcolor=color.white, color=color.new(color.red, 0), size=size.tiny)
+plotshape(showLegacyTFRE and reBuy,  title="RE Buy",  style=shape.labelup,   location=location.belowbar, text="RE BUY",  textcolor=color.white, color=color.new(color.teal, 0), size=size.tiny)
+plotshape(showLegacyTFRE and reSell, title="RE Sell", style=shape.labeldown, location=location.abovebar, text="RE SELL", textcolor=color.white, color=color.new(color.orange, 0), size=size.tiny)
+
+// Keep REV labels (optional — you can comment if you want)
+plotshape(revBuy,  title="REV Buy Entry",  style=shape.labelup,   location=location.belowbar, text="REV BUY",  textcolor=color.white, color=color.new(color.purple, 0), size=size.tiny)
+plotshape(revSell, title="REV Sell Entry", style=shape.labeldown, location=location.abovebar, text="REV SELL", textcolor=color.white, color=color.new(color.purple, 0), size=size.tiny)
+
+//====================================================
+// 12) Alerts (single pair of alerts)
+//====================================================
+alertcondition(buyNow,  title="BUY NOW",  message="BUY NOW (TF BUY or RE BUY): {{ticker}} {{interval}} close={{close}}")
+alertcondition(sellNow, title="SELL NOW", message="SELL NOW (TF SELL or RE SELL): {{ticker}} {{interval}} close={{close}}")

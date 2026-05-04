@@ -1,0 +1,279 @@
+//@version=5
+indicator("SBR & RBS + H4 Fib + M1 One-Signal Confirm", overlay=true, max_lines_count=500, max_labels_count=500)
+
+//=========================
+// INPUT
+//=========================
+pivotLen       = input.int(3, "Pivot Length", minval=1)
+showRBS        = input.bool(true, "Show Resistance Become Support (RBS)")
+showSBR        = input.bool(true, "Show Support Become Resistance (SBR)")
+lineExtendBars = input.int(5, "Line Extend Bars", minval=1)
+showLabels     = input.bool(true, "Show Labels")
+useCloseBreak  = input.bool(true, "Use Close For Breakout")
+
+enableM1Confirm      = input.bool(true, "Enable M1 Confirmation Signal")
+confirmTF            = input.timeframe("1", "Confirmation TF")
+showSignalLabels     = input.bool(true, "Show Buy/Sell Labels")
+confirmTolerancePerc = input.float(0.0008, "Confirm Touch Tolerance (%)", step=0.0001)
+wickBodyRatio        = input.float(0.2, "Min Wick/Body Ratio", step=0.1)
+allowRealtimeAlert   = input.bool(true, "Realtime Alert On M1")
+
+showFib       = input.bool(true, "Show Auto Fibonacci")
+showFibLabels = input.bool(true, "Show Fib Labels")
+fibTF         = input.timeframe("240", "Fibonacci Timeframe")
+fibPivotLen   = input.int(4, "Fib Pivot Length", minval=1)
+
+//=========================
+// MAIN TF PIVOT DETECTION
+//=========================
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float lastResistance = na
+var int lastResistanceBar = na
+var float lastSupport = na
+var int lastSupportBar = na
+
+if not na(ph)
+    lastResistance := ph
+    lastResistanceBar := bar_index - pivotLen
+
+if not na(pl)
+    lastSupport := pl
+    lastSupportBar := bar_index - pivotLen
+
+//=========================
+// BREAKOUT CONDITIONS ON CHART TF
+//=========================
+breakAboveResistance = not na(lastResistance) and (useCloseBreak ? ta.crossover(close, lastResistance) : high > lastResistance)
+breakBelowSupport    = not na(lastSupport) and (useCloseBreak ? ta.crossunder(close, lastSupport) : low < lastSupport)
+
+//=========================
+// AVOID DUPLICATE DRAWING
+//=========================
+var float lastDrawnRBS = na
+var float lastDrawnSBR = na
+
+newRBS = breakAboveResistance and (na(lastDrawnRBS) or lastDrawnRBS != lastResistance)
+newSBR = breakBelowSupport and (na(lastDrawnSBR) or lastDrawnSBR != lastSupport)
+
+//=========================
+// ACTIVE PARENT EVENT MEMORY
+// 1 parent event = 1 signal only
+//=========================
+var float activeRBSLevel = na
+var float activeSBRLevel = na
+var int activeRBSEventId = 0
+var int activeSBREventId = 0
+var bool activeRBSWaiting = false
+var bool activeSBRWaiting = false
+var bool activeRBSSignalDone = false
+var bool activeSBRSignalDone = false
+
+if newRBS
+    activeRBSLevel := lastResistance
+    activeRBSEventId += 1
+    activeRBSWaiting := true
+    activeRBSSignalDone := false
+
+if newSBR
+    activeSBRLevel := lastSupport
+    activeSBREventId += 1
+    activeSBRWaiting := true
+    activeSBRSignalDone := false
+
+//=========================
+// DRAW RBS
+//=========================
+if showRBS and newRBS
+    line.new(lastResistanceBar, lastResistance, bar_index + lineExtendBars, lastResistance, color=color.lime, width=2, style=line.style_solid)
+    if showLabels
+        label.new(bar_index, lastResistance, "RBS", style=label.style_label_up, color=color.lime, textcolor=color.black)
+    lastDrawnRBS := lastResistance
+
+//=========================
+// DRAW SBR
+//=========================
+if showSBR and newSBR
+    line.new(lastSupportBar, lastSupport, bar_index + lineExtendBars, lastSupport, color=color.red, width=2, style=line.style_solid)
+    if showLabels
+        label.new(bar_index, lastSupport, "SBR", style=label.style_label_down, color=color.red, textcolor=color.white)
+    lastDrawnSBR := lastSupport
+
+//=========================
+// M1 CONFIRMATION
+// parent SBR -> first bearish M1 rejection only once
+// parent RBS -> first bullish M1 rejection only once
+//=========================
+sbrTol = not na(activeSBRLevel) ? activeSBRLevel * confirmTolerancePerc : na
+rbsTol = not na(activeRBSLevel) ? activeRBSLevel * confirmTolerancePerc : na
+
+sellExpr = not na(activeSBRLevel) and high >= activeSBRLevel - sbrTol and high <= activeSBRLevel + sbrTol and close < activeSBRLevel and close < open and (high - math.max(open, close)) >= math.abs(close - open) * wickBodyRatio
+buyExpr  = not na(activeRBSLevel) and low <= activeRBSLevel + rbsTol and low >= activeRBSLevel - rbsTol and close > activeRBSLevel and close > open and (math.min(open, close) - low) >= math.abs(close - open) * wickBodyRatio
+
+ltfSellRejectRaw = request.security(syminfo.tickerid, confirmTF, sellExpr, barmerge.gaps_off, barmerge.lookahead_off)
+ltfBuyRejectRaw  = request.security(syminfo.tickerid, confirmTF, buyExpr, barmerge.gaps_off, barmerge.lookahead_off)
+ltfTime          = request.security(syminfo.tickerid, confirmTF, time, barmerge.gaps_off, barmerge.lookahead_off)
+
+// only first M1 bar for each parent event
+var int lastSellEventAlerted = na
+var int lastBuyEventAlerted = na
+var int lastSellM1Time = na
+var int lastBuyM1Time = na
+
+firstSellM1ForParent = enableM1Confirm and activeSBRWaiting and not activeSBRSignalDone and ltfSellRejectRaw and (na(lastSellM1Time) or ltfTime != lastSellM1Time)
+firstBuyM1ForParent  = enableM1Confirm and activeRBSWaiting and not activeRBSSignalDone and ltfBuyRejectRaw and (na(lastBuyM1Time) or ltfTime != lastBuyM1Time)
+
+finalSellSignal = firstSellM1ForParent and (na(lastSellEventAlerted) or lastSellEventAlerted != activeSBREventId)
+finalBuySignal  = firstBuyM1ForParent and (na(lastBuyEventAlerted) or lastBuyEventAlerted != activeRBSEventId)
+
+if finalSellSignal
+    lastSellM1Time := ltfTime
+    lastSellEventAlerted := activeSBREventId
+    activeSBRSignalDone := true
+    activeSBRWaiting := false
+
+if finalBuySignal
+    lastBuyM1Time := ltfTime
+    lastBuyEventAlerted := activeRBSEventId
+    activeRBSSignalDone := true
+    activeRBSWaiting := false
+
+if showSignalLabels and finalSellSignal
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.maroon, textcolor=color.white)
+
+if showSignalLabels and finalBuySignal
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white)
+
+//=========================
+// HTF FIBONACCI - OLD STYLE
+//=========================
+htfPivotHigh = request.security(syminfo.tickerid, fibTF, ta.pivothigh(high, fibPivotLen, fibPivotLen), lookahead=barmerge.lookahead_off)
+htfPivotLow  = request.security(syminfo.tickerid, fibTF, ta.pivotlow(low, fibPivotLen, fibPivotLen), lookahead=barmerge.lookahead_off)
+
+fibHighTimeExpr = not na(ta.pivothigh(high, fibPivotLen, fibPivotLen)) ? time[fibPivotLen] : na
+fibLowTimeExpr  = not na(ta.pivotlow(low, fibPivotLen, fibPivotLen)) ? time[fibPivotLen] : na
+
+htfPivotHighTime = request.security(syminfo.tickerid, fibTF, fibHighTimeExpr, lookahead=barmerge.lookahead_off)
+htfPivotLowTime  = request.security(syminfo.tickerid, fibTF, fibLowTimeExpr, lookahead=barmerge.lookahead_off)
+
+var float lastHTFHigh = na
+var int lastHTFHighTime = na
+var float lastHTFLow = na
+var int lastHTFLowTime = na
+
+newHTFHigh = not na(htfPivotHigh) and (na(lastHTFHighTime) or int(htfPivotHighTime) != lastHTFHighTime)
+newHTFLow  = not na(htfPivotLow) and (na(lastHTFLowTime) or int(htfPivotLowTime) != lastHTFLowTime)
+
+if newHTFHigh
+    lastHTFHigh := htfPivotHigh
+    lastHTFHighTime := int(htfPivotHighTime)
+
+if newHTFLow
+    lastHTFLow := htfPivotLow
+    lastHTFLowTime := int(htfPivotLowTime)
+
+haveHTFSwing   = not na(lastHTFHigh) and not na(lastHTFLow) and not na(lastHTFHighTime) and not na(lastHTFLowTime)
+isHTFUpSwing   = haveHTFSwing and lastHTFHighTime > lastHTFLowTime
+isHTFDownSwing = haveHTFSwing and lastHTFLowTime > lastHTFHighTime
+
+htfSwingStart     = isHTFUpSwing ? lastHTFLow : isHTFDownSwing ? lastHTFHigh : na
+htfSwingEnd       = isHTFUpSwing ? lastHTFHigh : isHTFDownSwing ? lastHTFLow : na
+htfSwingStartTime = isHTFUpSwing ? lastHTFLowTime : isHTFDownSwing ? lastHTFHighTime : na
+htfSwingEndTime   = isHTFUpSwing ? lastHTFHighTime : isHTFDownSwing ? lastHTFLowTime : na
+htfSwingRange     = haveHTFSwing ? math.abs(htfSwingEnd - htfSwingStart) : na
+
+fib0   = isHTFUpSwing ? htfSwingEnd : isHTFDownSwing ? htfSwingEnd : na
+fib236 = isHTFUpSwing ? htfSwingEnd - htfSwingRange * 0.236 : isHTFDownSwing ? htfSwingEnd + htfSwingRange * 0.236 : na
+fib382 = isHTFUpSwing ? htfSwingEnd - htfSwingRange * 0.382 : isHTFDownSwing ? htfSwingEnd + htfSwingRange * 0.382 : na
+fib500 = isHTFUpSwing ? htfSwingEnd - htfSwingRange * 0.500 : isHTFDownSwing ? htfSwingEnd + htfSwingRange * 0.500 : na
+fib618 = isHTFUpSwing ? htfSwingEnd - htfSwingRange * 0.618 : isHTFDownSwing ? htfSwingEnd + htfSwingRange * 0.618 : na
+fib786 = isHTFUpSwing ? htfSwingEnd - htfSwingRange * 0.786 : isHTFDownSwing ? htfSwingEnd + htfSwingRange * 0.786 : na
+fib1   = isHTFUpSwing ? htfSwingStart : isHTFDownSwing ? htfSwingStart : na
+
+//=========================
+// DRAW HTF FIB
+//=========================
+var line fibLine0 = na
+var line fibLine236 = na
+var line fibLine382 = na
+var line fibLine500 = na
+var line fibLine618 = na
+var line fibLine786 = na
+var line fibLine1 = na
+var line fibSwingLine = na
+
+var label fibLabel0 = na
+var label fibLabel236 = na
+var label fibLabel382 = na
+var label fibLabel500 = na
+var label fibLabel618 = na
+var label fibLabel786 = na
+var label fibLabel1 = na
+
+if barstate.islast
+    if not na(fibLine0)
+        line.delete(fibLine0)
+    if not na(fibLine236)
+        line.delete(fibLine236)
+    if not na(fibLine382)
+        line.delete(fibLine382)
+    if not na(fibLine500)
+        line.delete(fibLine500)
+    if not na(fibLine618)
+        line.delete(fibLine618)
+    if not na(fibLine786)
+        line.delete(fibLine786)
+    if not na(fibLine1)
+        line.delete(fibLine1)
+    if not na(fibSwingLine)
+        line.delete(fibSwingLine)
+
+    if not na(fibLabel0)
+        label.delete(fibLabel0)
+    if not na(fibLabel236)
+        label.delete(fibLabel236)
+    if not na(fibLabel382)
+        label.delete(fibLabel382)
+    if not na(fibLabel500)
+        label.delete(fibLabel500)
+    if not na(fibLabel618)
+        label.delete(fibLabel618)
+    if not na(fibLabel786)
+        label.delete(fibLabel786)
+    if not na(fibLabel1)
+        label.delete(fibLabel1)
+
+    if haveHTFSwing and showFib
+        fibSwingLine := line.new(htfSwingStartTime, htfSwingStart, htfSwingEndTime, htfSwingEnd, xloc=xloc.bar_time, extend=extend.none, color=color.white, width=2)
+        fibLine0   := line.new(htfSwingStartTime, fib0, time, fib0, xloc=xloc.bar_time, extend=extend.right, color=color.gray, width=1)
+        fibLine236 := line.new(htfSwingStartTime, fib236, time, fib236, xloc=xloc.bar_time, extend=extend.right, color=color.orange, width=1)
+        fibLine382 := line.new(htfSwingStartTime, fib382, time, fib382, xloc=xloc.bar_time, extend=extend.right, color=color.yellow, width=1)
+        fibLine500 := line.new(htfSwingStartTime, fib500, time, fib500, xloc=xloc.bar_time, extend=extend.right, color=color.blue, width=1)
+        fibLine618 := line.new(htfSwingStartTime, fib618, time, fib618, xloc=xloc.bar_time, extend=extend.right, color=color.green, width=2)
+        fibLine786 := line.new(htfSwingStartTime, fib786, time, fib786, xloc=xloc.bar_time, extend=extend.right, color=color.purple, width=1)
+        fibLine1   := line.new(htfSwingStartTime, fib1, time, fib1, xloc=xloc.bar_time, extend=extend.right, color=color.gray, width=1)
+
+        if showFibLabels
+            fibLabel0   := label.new(time, fib0, "0.000", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.gray, 70))
+            fibLabel236 := label.new(time, fib236, "0.236", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.orange, 70))
+            fibLabel382 := label.new(time, fib382, "0.382", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.yellow, 70))
+            fibLabel500 := label.new(time, fib500, "0.500", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.blue, 70))
+            fibLabel618 := label.new(time, fib618, "0.618", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.green, 70))
+            fibLabel786 := label.new(time, fib786, "0.786", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.purple, 70))
+            fibLabel1   := label.new(time, fib1, "1.000", xloc=xloc.bar_time, style=label.style_label_left, textcolor=color.white, color=color.new(color.gray, 70))
+
+//=========================
+// OPTIONAL PLOT PIVOTS
+//=========================
+plotshape(not na(ph), title="Pivot High", style=shape.triangledown, location=location.abovebar, color=color.orange, size=size.tiny, offset=-pivotLen)
+plotshape(not na(pl), title="Pivot Low", style=shape.triangleup, location=location.belowbar, color=color.aqua, size=size.tiny, offset=-pivotLen)
+
+//=========================
+// ALERT() FOR ANY ALERT FUNCTION CALL
+//=========================
+if allowRealtimeAlert and finalSellSignal
+    alert("SELL | " + syminfo.ticker + " | Chart TF: " + timeframe.period + " | Confirm TF: " + confirmTF + " | Parent SBR: " + str.tostring(activeSBRLevel) + " | Price: " + str.tostring(close), alert.freq_once_per_bar)
+
+if allowRealtimeAlert and finalBuySignal
+    alert("BUY | " + syminfo.ticker + " | Chart TF: " + timeframe.period + " | Confirm TF: " + confirmTF + " | Parent RBS: " + str.tostring(activeRBSLevel) + " | Price: " + str.tostring(close), alert.freq_once_per_bar)

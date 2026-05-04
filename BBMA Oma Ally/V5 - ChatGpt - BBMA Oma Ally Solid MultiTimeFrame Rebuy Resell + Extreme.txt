@@ -1,0 +1,200 @@
+//@version=5
+indicator("BBMA OMA Ally - TF1 RE + Tight Extreme", overlay=true, max_labels_count=500)
+
+//====================================================
+// 0) Helper: symbol detection
+//====================================================
+sym = str.upper(syminfo.ticker)
+isGOLD = str.contains(sym, "GOLD") or str.contains(sym, "XAU")
+isGJ = str.contains(sym, "GBPJPY") or (str.contains(sym, "GBP") and str.contains(sym, "JPY"))
+isGU = str.contains(sym, "GBPUSD") or (str.contains(sym, "GBP") and str.contains(sym, "USD"))
+isGA = str.contains(sym, "GBPAUD") or (str.contains(sym, "GBP") and str.contains(sym, "AUD"))
+isEJ = str.contains(sym, "EURJPY") or (str.contains(sym, "EUR") and str.contains(sym, "JPY"))
+
+//====================================================
+// 1) Inputs
+//====================================================
+useAutoProfile = input.bool(true, "Auto-switch settings by symbol (recommended)")
+bbLen = input.int(20, "BB Period", minval=5)
+bbDev = input.float(2.0, "BB Deviation", minval=0.5, step=0.1)
+atrLen = input.int(14, "ATR Length", minval=5)
+
+useH1FilterTF = input.bool(true, "Use H1 Filter for TF / RE")
+useBarCloseConfirm = input.bool(false, "Confirm on bar close (OFF = faster alert)")
+
+reLookbackBars = input.int(10, "REENTRY: Momentum lookback bars", minval=1)
+reBlockWhenBBFlat = input.bool(true, "REENTRY: Block when BB flat (recommended)")
+reUseMA = input.string("MA10", "REENTRY: Touch MA", options=["MA5","MA10"])
+
+flatLookbackBars_manual = input.int(20, "BB Flat (manual): width avg lookback", minval=5)
+flatSlopeATR_manual = input.float(0.30, "BB Flat (manual): MidBB slope per bar <= ATR*x", minval=0.01, step=0.01)
+flatWidthATR_manual = input.float(3.0, "BB Flat (manual): Bandwidth <= ATR*x", minval=0.1, step=0.1)
+useWidthStable = input.bool(true, "BB Flat: require width not expanding fast")
+widthStablePct_manual = input.float(1.15, "BB Flat (manual): width <= avgWidth * factor", minval=1.0, step=0.05)
+
+showReSignals = input.bool(true, "Show RE BUY / RE SELL")
+showExtremeSignals = input.bool(true, "Show EXTREME BUY / EXTREME SELL")
+showDebug = input.bool(false, "Show debug marks")
+
+sendAlerts = input.bool(true, "Send alerts via alert()")
+alertRE = input.bool(true, "Alert RE BUY / RE SELL")
+alertExtreme = input.bool(true, "Alert EXTREME BUY / EXTREME SELL")
+
+//====================================================
+// 2) Auto profile table
+//====================================================
+flatSlopeATR_auto = isGOLD ? 0.40 : isGJ ? 0.40 : isGU ? 0.30 : isGA ? 0.25 : isEJ ? 0.35 : 0.30
+flatWidthATR_auto = isGOLD ? 4.5 : isGJ ? 4.0 : isGU ? 3.0 : isGA ? 2.6 : isEJ ? 3.5 : 3.0
+widthStablePct_auto = isGOLD ? 1.20 : isGJ ? 1.20 : isGU ? 1.15 : isGA ? 1.12 : isEJ ? 1.18 : 1.15
+flatLookbackBars_auto = 20
+
+flatLookbackBars = useAutoProfile ? flatLookbackBars_auto : flatLookbackBars_manual
+flatSlopeATR = useAutoProfile ? flatSlopeATR_auto : flatSlopeATR_manual
+flatWidthATR = useAutoProfile ? flatWidthATR_auto : flatWidthATR_manual
+widthStablePct = useAutoProfile ? widthStablePct_auto : widthStablePct_manual
+
+//====================================================
+// 3) Indicators
+//====================================================
+midBB = ta.sma(close, bbLen)
+dev = bbDev * ta.stdev(close, bbLen)
+upper = midBB + dev
+lower = midBB - dev
+ema50 = ta.ema(close, 50)
+ma5H = ta.wma(high, 5)
+ma10H = ta.wma(high, 10)
+ma5L = ta.wma(low, 5)
+ma10L = ta.wma(low, 10)
+atr = ta.atr(atrLen)
+
+//====================================================
+// 4) H1 filter (for TF / RE only)
+//====================================================
+h1Close = request.security(syminfo.tickerid, "60", close)
+h1EMA50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+h1MidBB = request.security(syminfo.tickerid, "60", ta.sma(close, bbLen))
+h1Bull = h1Close > h1EMA50 and h1Close > h1MidBB
+h1Bear = h1Close < h1EMA50 and h1Close < h1MidBB
+allowBuyTF = not useH1FilterTF or h1Bull
+allowSellTF = not useH1FilterTF or h1Bear
+
+//====================================================
+// 5) BB Flat detection
+//====================================================
+midSlopePerBar = math.abs(midBB - midBB[1])
+bbWidth = upper - lower
+avgWidth = ta.sma(bbWidth, flatLookbackBars)
+widthStableOK = not useWidthStable or (bbWidth <= avgWidth * widthStablePct)
+bbFlat = (midSlopePerBar <= atr * flatSlopeATR) and (bbWidth <= atr * flatWidthATR) and widthStableOK
+
+//====================================================
+// 6) Candle direction + body bounds
+//====================================================
+isBull = close > open
+isBear = close < open
+bodyHigh = math.max(open, close)
+bodyLow = math.min(open, close)
+
+//====================================================
+// 7) TF1 Momentum logic (follow old script)
+//====================================================
+tfMomBuy = allowBuyTF and close > upper and isBull
+tfMomSell = allowSellTF and close < lower and isBear
+
+//====================================================
+// 8) TF1 Reentry logic (follow old script + EMA50 filter)
+//====================================================
+reMA_L = reUseMA == "MA5" ? ma5L : ma10L
+reMA_H = reUseMA == "MA5" ? ma5H : ma10H
+momBuyRecent = ta.barssince(tfMomBuy) > 0 and ta.barssince(tfMomBuy) <= reLookbackBars
+momSellRecent = ta.barssince(tfMomSell) > 0 and ta.barssince(tfMomSell) <= reLookbackBars
+reAllowed = not reBlockWhenBBFlat or not bbFlat
+reBuyRaw = allowBuyTF and reAllowed and momBuyRecent and low <= reMA_L and close > reMA_L and isBull and close > ema50
+reSellRaw = allowSellTF and reAllowed and momSellRecent and high >= reMA_H and close < reMA_H and isBear and close < ema50
+reBuy = useBarCloseConfirm ? (reBuyRaw and barstate.isconfirmed) : reBuyRaw
+reSell = useBarCloseConfirm ? (reSellRaw and barstate.isconfirmed) : reSellRaw
+newReBuy = reBuy and not reBuy[1]
+newReSell = reSell and not reSell[1]
+
+//====================================================
+// 9) Tight Extreme logic
+// Extreme Sell:
+// - shadow cucuk Top BB
+// - shadow cucuk WMA5 High
+// - optional cucuk EMA50
+// - WMA5 High mesti di luar BB
+// - wick only outside BB
+//
+// Extreme Buy:
+// - shadow cucuk Bottom BB
+// - shadow cucuk WMA5 Low
+// - optional cucuk EMA50
+// - WMA5 Low mesti di luar BB
+// - wick only outside BB
+//====================================================
+touchTopBB = high >= upper
+touchBottomBB = low <= lower
+
+touchWma5High = high >= ma5H
+touchWma5Low = low <= ma5L
+touchEma50FromTop = high >= ema50
+touchEma50FromBottom = low <= ema50
+
+wma5HighOutsideBB = ma5H > upper
+wma5LowOutsideBB = ma5L < lower
+
+wickOnlyExtremeSell = touchTopBB and bodyHigh <= upper and close <= upper
+wickOnlyExtremeBuy = touchBottomBB and bodyLow >= lower and close >= lower
+
+extremeSellType3 = wickOnlyExtremeSell and touchWma5High and touchEma50FromTop and wma5HighOutsideBB
+extremeSellType2 = wickOnlyExtremeSell and touchWma5High and wma5HighOutsideBB
+extremeBuyType3 = wickOnlyExtremeBuy and touchWma5Low and touchEma50FromBottom and wma5LowOutsideBB
+extremeBuyType2 = wickOnlyExtremeBuy and touchWma5Low and wma5LowOutsideBB
+
+extremeSellRaw = extremeSellType3 or extremeSellType2
+extremeBuyRaw = extremeBuyType3 or extremeBuyType2
+
+extremeSell = useBarCloseConfirm ? (extremeSellRaw and barstate.isconfirmed) : extremeSellRaw
+extremeBuy = useBarCloseConfirm ? (extremeBuyRaw and barstate.isconfirmed) : extremeBuyRaw
+newExtremeSell = extremeSell and not extremeSell[1]
+newExtremeBuy = extremeBuy and not extremeBuy[1]
+
+//====================================================
+// 10) Plots
+//====================================================
+plot(upper, "BB Upper", color=color.new(color.black, 0))
+plot(midBB, "BB Mid", color=color.new(color.gray, 0))
+plot(lower, "BB Lower", color=color.new(color.black, 0))
+plot(ema50, "EMA50", color=color.new(color.lime, 0))
+plot(ma5H, "WMA5 High", color=color.new(color.blue, 0))
+plot(ma10H, "WMA10 High", color=color.new(color.yellow, 0))
+plot(ma5L, "WMA5 Low", color=color.new(color.fuchsia, 0))
+plot(ma10L, "WMA10 Low", color=color.new(color.white, 0))
+
+plotshape(showReSignals and newReBuy, title="RE BUY", style=shape.labelup, location=location.belowbar, text="RE BUY", textcolor=color.white, color=color.new(color.green, 0), size=size.small)
+plotshape(showReSignals and newReSell, title="RE SELL", style=shape.labeldown, location=location.abovebar, text="RE SELL", textcolor=color.white, color=color.new(color.red, 0), size=size.small)
+
+plotshape(showExtremeSignals and newExtremeBuy, title="EXTREME BUY", style=shape.labelup, location=location.belowbar, text="EXTREME BUY", textcolor=color.white, color=color.new(color.green, 0), size=size.small)
+plotshape(showExtremeSignals and newExtremeSell, title="EXTREME SELL", style=shape.labeldown, location=location.abovebar, text="EXTREME SELL", textcolor=color.white, color=color.new(color.red, 0), size=size.small)
+
+plotshape(showDebug and tfMomBuy, title="Momentum Buy Debug", style=shape.circle, location=location.belowbar, text="MOM", textcolor=color.white, color=color.new(color.green, 70), size=size.tiny)
+plotshape(showDebug and tfMomSell, title="Momentum Sell Debug", style=shape.circle, location=location.abovebar, text="MOM", textcolor=color.white, color=color.new(color.red, 70), size=size.tiny)
+plotshape(showDebug and newExtremeBuy and extremeBuyType3, title="Extreme Buy Type 3 Debug", style=shape.circle, location=location.belowbar, text="B3", textcolor=color.white, color=color.new(color.green, 75), size=size.tiny)
+plotshape(showDebug and newExtremeBuy and not extremeBuyType3 and extremeBuyType2, title="Extreme Buy Type 2 Debug", style=shape.circle, location=location.belowbar, text="B2", textcolor=color.white, color=color.new(color.green, 85), size=size.tiny)
+plotshape(showDebug and newExtremeSell and extremeSellType3, title="Extreme Sell Type 3 Debug", style=shape.circle, location=location.abovebar, text="S3", textcolor=color.white, color=color.new(color.red, 75), size=size.tiny)
+plotshape(showDebug and newExtremeSell and not extremeSellType3 and extremeSellType2, title="Extreme Sell Type 2 Debug", style=shape.circle, location=location.abovebar, text="S2", textcolor=color.white, color=color.new(color.red, 85), size=size.tiny)
+
+//====================================================
+// 11) Single Any alert() function call
+// Only RE BUY / RE SELL
+// Only send when candle close
+//====================================================
+fmt(x) => str.tostring(x, format.mintick)
+reBuyAlert = newReBuy and barstate.isconfirmed
+reSellAlert = newReSell and barstate.isconfirmed
+signalText = reBuyAlert and alertRE ? "RE BUY" : reSellAlert and alertRE ? "RE SELL" : ""
+signalSource = reBuyAlert or reSellAlert ? "TF1 RE" : ""
+alertMsg = signalText != "" ? signalText + " | " + signalSource + " | " + syminfo.ticker + " " + timeframe.period + " | close=" + fmt(close) : ""
+
+if sendAlerts and alertMsg != ""
+    alert(alertMsg, alert.freq_once_per_bar_close)

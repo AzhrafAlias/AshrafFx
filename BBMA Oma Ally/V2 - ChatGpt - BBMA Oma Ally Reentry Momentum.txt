@@ -1,0 +1,148 @@
+//@version=5
+indicator("BBMA OMA Ally - ZERO LOSS v5 + BUY/SELL SHOT (MA Cluster) | Any alert() only", overlay=true, max_labels_count=500)
+
+//==================== Inputs ====================
+bbLen   = input.int(20, "BB Period", minval=5)
+bbDev   = input.float(2.0, "BB Deviation", minval=0.5, step=0.1)
+emaLen  = input.int(50, "EMA (MA50)", minval=10)
+c2Mode  = input.string("CloseHigher/Lower", "Candle2 Confirm Mode", options=["CloseHigher/Lower", "BreakHigh/Low"])
+
+useH1MomentumGate = input.bool(true, "Require H1 Momentum (out of BB) to validate M15 reentry")
+h1MomLookback     = input.int(2, "H1 momentum lookback bars (0-3)", minval=0, maxval=10)
+
+enableShot  = input.bool(true, "Enable BUY SHOT / SELL SHOT")
+shotMinBars = input.int(2, "Min bars berselirat before SHOT", minval=1, maxval=10)
+shotAtrMult = input.float(0.80, "Cluster width threshold (ATR multiplier)", minval=0.1, maxval=2.0, step=0.05)
+
+sendAlerts           = input.bool(true, "Send alerts via alert() (use Any alert() function call)")
+alertOncePerBarClose = input.bool(true, "Alert frequency: once per bar close (recommended)")
+
+//==================== BBMA core ====================
+midBB = ta.sma(close, bbLen)
+dev   = bbDev * ta.stdev(close, bbLen)
+upper = midBB + dev
+lower = midBB - dev
+ema50 = ta.ema(close, emaLen)
+
+ma5H  = ta.wma(high, 5)
+ma10H = ta.wma(high, 10)
+ma5L  = ta.wma(low, 5)
+ma10L = ta.wma(low, 10)
+
+atr = ta.atr(14)
+
+isBull   = close > open
+isBear   = close < open
+bodyHigh = math.max(open, close)
+bodyLow  = math.min(open, close)
+
+buyZoneLow   = math.min(ma5L, ma10L)
+buyZoneHigh  = math.max(ma5L, ma10L)
+sellZoneLow  = math.min(ma5H, ma10H)
+sellZoneHigh = math.max(ma5H, ma10H)
+
+//==================== Trend rules ====================
+uptrend   = (midBB > ema50) and (ma5L > midBB) and (ma10L > midBB)
+downtrend = (midBB < ema50) and (ma5H < midBB) and (ma10H < midBB)
+
+//==================== Candle1 (Validation) ====================
+buyCloseOK     = (close > ma5L) and (close > ma10L)
+buyBodyNoCross = (bodyLow >= buyZoneLow)
+buyTouchZone   = (low <= buyZoneHigh)
+buyC1 = uptrend and buyCloseOK and buyBodyNoCross and buyTouchZone
+
+sellCloseOK     = (close < ma5H) and (close < ma10H)
+sellBodyNoCross = (bodyHigh <= sellZoneHigh)
+sellTouchZone   = (high >= sellZoneLow)
+sellC1 = downtrend and sellCloseOK and sellBodyNoCross and sellTouchZone
+
+//==================== Candle2 (Entry Confirm) ====================
+buyC2_basic  = uptrend and isBull and (close > ma5L) and (close > ma10L)
+sellC2_basic = downtrend and isBear and (close < ma5H) and (close < ma10H)
+
+buyC2_confirm  = c2Mode == "BreakHigh/Low" ? (high > high[1]) : (close > close[1])
+sellC2_confirm = c2Mode == "BreakHigh/Low" ? (low < low[1]) : (close < close[1])
+
+buyC2  = buyC2_basic  and buyC2_confirm
+sellC2 = sellC2_basic and sellC2_confirm
+
+//==================== H1 Momentum Gate ====================
+h1_mid   = request.security(syminfo.tickerid, "60", ta.sma(close, bbLen))
+h1_dev   = request.security(syminfo.tickerid, "60", bbDev * ta.stdev(close, bbLen))
+h1_up    = h1_mid + h1_dev
+h1_lo    = h1_mid - h1_dev
+h1_close = request.security(syminfo.tickerid, "60", close)
+
+h1MomBuyNow  = ta.barssince(h1_close > h1_up) <= h1MomLookback
+h1MomSellNow = ta.barssince(h1_close < h1_lo) <= h1MomLookback
+
+h1BuyGate  = (not useH1MomentumGate) or h1MomBuyNow
+h1SellGate = (not useH1MomentumGate) or h1MomSellNow
+
+//==================== Signals ====================
+buyNow  = (buyC1[1] and buyC2) and h1BuyGate
+sellNow = (sellC1[1] and sellC2) and h1SellGate
+
+//==================== SHOT logic — MA berselirat rapat2 ====================
+maClusterHigh  = math.max(math.max(ma5H, ma10H), math.max(ma5L, ma10L))
+maClusterLow   = math.min(math.min(ma5H, ma10H), math.min(ma5L, ma10L))
+maClusterMid   = (maClusterHigh + maClusterLow) / 2.0
+maClusterWidth = maClusterHigh - maClusterLow
+
+// ── BERSELIRAT: semua 4 MA squeeze dalam lebar sempit ──
+// Buang syarat intertwined — gambar tunjuk MA rapat TAPI tak semestinya cross
+berselirat = maClusterWidth <= (atr * shotAtrMult)
+
+var int tightBarCount = 0
+tightBarCount := berselirat ? tightBarCount[1] + 1 : 0
+
+berseliratConfirmed = tightBarCount >= shotMinBars
+wasBeforelirat      = tightBarCount[1] >= shotMinBars
+
+// Body candle kena ada (bukan doji)
+bodyStrong = math.abs(close - open) >= (atr * 0.20)
+
+//==================== SHOT Entry (one line) ====================
+buyShotRaw  = enableShot and wasBeforelirat and not berselirat and isBull and bodyStrong and close > maClusterMid and close > close[1]
+sellShotRaw = enableShot and wasBeforelirat and not berselirat and isBear and bodyStrong and close < maClusterMid and close < close[1]
+
+buyShot  = barstate.isconfirmed and buyShotRaw
+sellShot = barstate.isconfirmed and sellShotRaw
+
+//==================== Plots ====================
+plot(upper, "BB Upper", color=color.new(color.black, 0))
+plot(midBB, "BB Mid",   color=color.new(color.gray, 0))
+plot(lower, "BB Lower", color=color.new(color.black, 0))
+plot(ema50, "EMA50",    color=color.new(color.lime, 0))
+
+plot(ma5H,  "WMA5 High",  color=color.new(color.blue, 0))
+plot(ma10H, "WMA10 High", color=color.new(color.yellow, 0))
+plot(ma5L,  "WMA5 Low",   color=color.new(color.fuchsia, 0))
+plot(ma10L, "WMA10 Low",  color=color.new(color.white, 0))
+
+bgcolor(berseliratConfirmed ? color.new(color.purple, 80) : na, title="Berselirat Zone")
+
+plotshape(buyC1,  title="C1 Buy Valid",  style=shape.circle, location=location.belowbar, size=size.tiny, color=color.new(color.green, 60), text="C1B")
+plotshape(sellC1, title="C1 Sell Valid", style=shape.circle, location=location.abovebar, size=size.tiny, color=color.new(color.red, 60),   text="C1S")
+
+plotshape(buyNow,  title="BUY NOW",  style=shape.labelup,   location=location.belowbar, text="BUY NOW",  textcolor=color.white, color=color.new(color.green, 0), size=size.small)
+plotshape(sellNow, title="SELL NOW", style=shape.labeldown, location=location.abovebar, text="SELL NOW", textcolor=color.white, color=color.new(color.red, 0),   size=size.small)
+
+plotshape(buyShot,  title="BUY SHOT",  style=shape.labelup,   location=location.belowbar, text="BUY SHOT",  textcolor=color.white, color=color.new(color.teal, 0),   size=size.normal)
+plotshape(sellShot, title="SELL SHOT", style=shape.labeldown, location=location.abovebar, text="SELL SHOT", textcolor=color.white, color=color.new(color.orange, 0), size=size.normal)
+
+//==================== Alerts ====================
+fmt(x) => str.tostring(x, format.mintick)
+freq = alertOncePerBarClose ? alert.freq_once_per_bar_close : alert.freq_all
+
+if sendAlerts and buyNow and barstate.isconfirmed
+    alert("BUY NOW (Zero Loss v5 + H1 momentum) | " + syminfo.ticker + " " + timeframe.period + " | close=" + fmt(close), freq)
+
+if sendAlerts and sellNow and barstate.isconfirmed
+    alert("SELL NOW (Zero Loss v5 + H1 momentum) | " + syminfo.ticker + " " + timeframe.period + " | close=" + fmt(close), freq)
+
+if sendAlerts and buyShot and barstate.isconfirmed
+    alert("BUY SHOT (MA berselirat rapat) | " + syminfo.ticker + " " + timeframe.period + " | close=" + fmt(close), freq)
+
+if sendAlerts and sellShot and barstate.isconfirmed
+    alert("SELL SHOT (MA berselirat rapat) | " + syminfo.ticker + " " + timeframe.period + " | close=" + fmt(close), freq)
