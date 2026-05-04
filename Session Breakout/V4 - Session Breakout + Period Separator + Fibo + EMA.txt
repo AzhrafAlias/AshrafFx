@@ -1,5 +1,5 @@
 //@version=5
-indicator("Breakout Pagi FIXED (M5 Strict + Trend + TP/SL + Fibo Label)", overlay=true, max_lines_count=500, max_labels_count=500)
+indicator("Breakout Pagi FIXED (M5 Strict + Trend + TP 5 Point + Fibo Label)", overlay=true, max_lines_count=500, max_labels_count=500)
 
 // ── SETTINGS ─────────────────────────────────────────────
 i_tz        = input.string("Asia/Kuala_Lumpur", "Timezone")
@@ -20,8 +20,7 @@ showEMA        = input.bool(true, "Show EMA")
 // ── TP/SL SETTINGS ───────────────────────────────────────
 showTPSL    = input.bool(true, "Show TP/SL Auto")
 tpLineBars  = input.int(30, "TP/SL Line Extend Bars", minval=1)
-tp1RR       = input.float(1.0, "TP1 Box Range Multiplier")
-tp2RR       = input.float(2.0, "TP2 Box Range Multiplier")
+tpPoints    = input.float(5.0, "TP Point From Line Price", step=0.1)
 
 // ── FIB SETTINGS ─────────────────────────────────────────
 showFib     = input.bool(true, "Show Auto Fibonacci")
@@ -77,17 +76,15 @@ plot(showEMA ? m5_ema : na, title="EMA Trend Filter", color=color.yellow, linewi
 // =======================================================
 // TP/SL FUNCTION
 // =======================================================
-drawTPSL(_entry, _sl, _tp1, _tp2, _name) =>
+drawTPSL(_linePrice, _sl, _tp, _name) =>
     if showTPSL
-        line.new(bar_index, _entry, bar_index + tpLineBars, _entry, xloc=xloc.bar_index, color=color.white, width=1)
-        line.new(bar_index, _sl,    bar_index + tpLineBars, _sl,    xloc=xloc.bar_index, color=color.red, width=1)
-        line.new(bar_index, _tp1,   bar_index + tpLineBars, _tp1,   xloc=xloc.bar_index, color=color.lime, width=1)
-        line.new(bar_index, _tp2,   bar_index + tpLineBars, _tp2,   xloc=xloc.bar_index, color=color.green, width=1)
+        line.new(bar_index, _linePrice, bar_index + tpLineBars, _linePrice, xloc=xloc.bar_index, color=color.white, width=1)
+        line.new(bar_index, _sl,        bar_index + tpLineBars, _sl,        xloc=xloc.bar_index, color=color.red, width=1)
+        line.new(bar_index, _tp,        bar_index + tpLineBars, _tp,        xloc=xloc.bar_index, color=color.lime, width=1)
 
-        label.new(bar_index + tpLineBars, _entry, _name + " ENTRY", xloc=xloc.bar_index, style=label.style_label_left, color=color.white, textcolor=color.black)
+        label.new(bar_index + tpLineBars, _linePrice, _name + " LINE", xloc=xloc.bar_index, style=label.style_label_left, color=color.white, textcolor=color.black)
         label.new(bar_index + tpLineBars, _sl, "SL", xloc=xloc.bar_index, style=label.style_label_left, color=color.red, textcolor=color.white)
-        label.new(bar_index + tpLineBars, _tp1, "TP1", xloc=xloc.bar_index, style=label.style_label_left, color=color.lime, textcolor=color.black)
-        label.new(bar_index + tpLineBars, _tp2, "TP2", xloc=xloc.bar_index, style=label.style_label_left, color=color.green, textcolor=color.white)
+        label.new(bar_index + tpLineBars, _tp, "TP 5 POINT", xloc=xloc.bar_index, style=label.style_label_left, color=color.lime, textcolor=color.black)
 
 // =======================================================
 // STATE
@@ -165,50 +162,46 @@ trendSellOK = not useTrendFilter or m5_close < m5_ema
 // BREAKOUT SIGNAL
 // =======================================================
 if isM5Chart and condActive and box_ready and not sig_done and not na(lvl_high) and not na(lvl_low)
-    boxRange = lvl_high - lvl_low
-
     buyBreak  = m5_low > lvl_high
     sellBreak = m5_high < lvl_low
 
     if buyBreak and trendBuyOK
-        entry = m5_close
-        sl    = lvl_low
-        tp1   = entry + boxRange * tp1RR
-        tp2   = entry + boxRange * tp2RR
+        linePrice = lvl_high
+        sl        = lvl_low
+        tp        = linePrice + tpPoints
 
         label.new(
              bar_index,
              low,
-             "BUY\nM5 STRICT",
+             "BUY\nM5 STRICT\nLine: " + str.tostring(linePrice, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick),
              style=label.style_label_up,
              color=i_col_buy,
              textcolor=color.white)
 
-        drawTPSL(entry, sl, tp1, tp2, "BUY")
+        drawTPSL(linePrice, sl, tp, "BUY")
 
         if enableAlerts
-            alert("BUY Breakout Pagi - Full M5 Candle Above Box", alert.freq_once_per_bar_close)
+            alert("BUY Breakout Pagi M5 Strict Breakout | Line Price: " + str.tostring(linePrice, format.mintick) + " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(tp, format.mintick), alert.freq_once_per_bar_close)
 
         sig_done := true
 
     else if sellBreak and trendSellOK
-        entry = m5_close
-        sl    = lvl_high
-        tp1   = entry - boxRange * tp1RR
-        tp2   = entry - boxRange * tp2RR
+        linePrice = lvl_low
+        sl        = lvl_high
+        tp        = linePrice - tpPoints
 
         label.new(
              bar_index,
              high,
-             "SELL\nM5 STRICT",
+             "SELL\nM5 STRICT\nLine: " + str.tostring(linePrice, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick),
              style=label.style_label_down,
              color=i_col_sell,
              textcolor=color.white)
 
-        drawTPSL(entry, sl, tp1, tp2, "SELL")
+        drawTPSL(linePrice, sl, tp, "SELL")
 
         if enableAlerts
-            alert("SELL Breakout Pagi - Full M5 Candle Below Box", alert.freq_once_per_bar_close)
+            alert("SELL Breakout Pagi M5 Strict Breakout | Line Price: " + str.tostring(linePrice, format.mintick) + " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(tp, format.mintick), alert.freq_once_per_bar_close)
 
         sig_done := true
 
@@ -251,7 +244,7 @@ end       = isUp ? lastHigh : isDown ? lastLow : na
 startTime = isUp ? lastLowTime : isDown ? lastHighTime : na
 
 fibRange = haveSwing ? math.abs(end - start) : na
-futureTime = startTime + int((time - startTime) * 1.3)
+futureTime = haveSwing ? startTime + int((time - startTime) * 1.3) : na
 
 fib0   = end
 fib236 = isUp ? end - fibRange * 0.236 : end + fibRange * 0.236

@@ -69,7 +69,7 @@ buySellLabelSize  = input.string("normal", "BUY/SELL Label Size", options=["tiny
 //=========================
 // TP SETTING
 //=========================
-tpPoints   = input.float(10.0, "TP Points From RSS/SRR Line", step=0.1)
+tpPoints   = input.float(5.0, "TP Points From RSS/SRR Line", step=0.1)
 showTPLine = input.bool(true, "Show TP Line")
 
 //=========================

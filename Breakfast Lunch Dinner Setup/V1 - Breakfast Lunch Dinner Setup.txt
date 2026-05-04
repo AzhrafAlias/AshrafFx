@@ -1,5 +1,5 @@
 //@version=5
-indicator("Breakfast Lunch Dinner Setup + Auto Fib PRO FIXED", overlay=true, max_lines_count=500, max_labels_count=500)
+indicator("Breakfast Lunch Dinner Setup + Auto Fib PRO FIXED + Line Price Alert", overlay=true, max_lines_count=500, max_labels_count=500)
 
 // ── SETTINGS ─────────────────────────────────────────────
 i_tz        = input.string("Asia/Kuala_Lumpur", "Timezone")
@@ -18,8 +18,7 @@ showEMA        = input.bool(true, "Show EMA")
 // ── TP/SL SETTINGS ───────────────────────────────────────
 showTPSL    = input.bool(true, "Show TP/SL Auto")
 tpLineBars  = input.int(30, "TP/SL Line Extend Bars", minval=1)
-tp1RR       = input.float(1.0, "TP1 Box Range Multiplier")
-tp2RR       = input.float(2.0, "TP2 Box Range Multiplier")
+tpPoints    = input.float(5.0, "TP Point From Line Price", step=0.1)
 
 // ── FIB SETTINGS ─────────────────────────────────────────
 showFib     = input.bool(true, "Show Auto Fibonacci")
@@ -76,17 +75,15 @@ plot(showEMA ? m5_ema : na, title="EMA Trend Filter", color=color.yellow, linewi
 // =======================================================
 // TP/SL FUNCTION
 // =======================================================
-drawTPSL(_isBuy, _entry, _sl, _tp1, _tp2, _name) =>
+drawTPSL(_linePrice, _sl, _tp, _name) =>
     if showTPSL
-        line.new(bar_index, _entry, bar_index + tpLineBars, _entry, xloc=xloc.bar_index, color=color.white, width=1)
-        line.new(bar_index, _sl,    bar_index + tpLineBars, _sl,    xloc=xloc.bar_index, color=color.red, width=1)
-        line.new(bar_index, _tp1,   bar_index + tpLineBars, _tp1,   xloc=xloc.bar_index, color=color.lime, width=1)
-        line.new(bar_index, _tp2,   bar_index + tpLineBars, _tp2,   xloc=xloc.bar_index, color=color.green, width=1)
+        line.new(bar_index, _linePrice, bar_index + tpLineBars, _linePrice, xloc=xloc.bar_index, color=color.white, width=1)
+        line.new(bar_index, _sl,        bar_index + tpLineBars, _sl,        xloc=xloc.bar_index, color=color.red, width=1)
+        line.new(bar_index, _tp,        bar_index + tpLineBars, _tp,        xloc=xloc.bar_index, color=color.lime, width=1)
 
-        label.new(bar_index + tpLineBars, _entry, _name + " ENTRY", xloc=xloc.bar_index, style=label.style_label_left, color=color.white, textcolor=color.black)
+        label.new(bar_index + tpLineBars, _linePrice, _name + " LINE", xloc=xloc.bar_index, style=label.style_label_left, color=color.white, textcolor=color.black)
         label.new(bar_index + tpLineBars, _sl, "SL", xloc=xloc.bar_index, style=label.style_label_left, color=color.red, textcolor=color.white)
-        label.new(bar_index + tpLineBars, _tp1, "TP1", xloc=xloc.bar_index, style=label.style_label_left, color=color.lime, textcolor=color.black)
-        label.new(bar_index + tpLineBars, _tp2, "TP2", xloc=xloc.bar_index, style=label.style_label_left, color=color.green, textcolor=color.white)
+        label.new(bar_index + tpLineBars, _tp, "TP 5 POINT", xloc=xloc.bar_index, style=label.style_label_left, color=color.lime, textcolor=color.black)
 
 // =======================================================
 // BREAKFAST
@@ -191,38 +188,34 @@ trendSellOK = not useTrendFilter or m5_close < m5_ema
 // BREAKFAST SIGNAL
 // =======================================================
 if isM5Chart and condB and not b_done and not na(b_high) and not na(b_low)
-    b_range = b_high - b_low
-
     buyBreakB  = m5_low > b_high
     sellBreakB = m5_high < b_low
 
     if buyBreakB and trendBuyOK
-        entry = m5_close
-        sl    = b_low
-        tp1   = entry + b_range * tp1RR
-        tp2   = entry + b_range * tp2RR
+        linePrice = b_high
+        sl        = b_low
+        tp        = linePrice + tpPoints
 
-        label.new(bar_index, low, "BUY\nBREAKFAST\nM5", style=label.style_label_up, color=i_col_buy, textcolor=color.white)
+        label.new(bar_index, low, "BUY\nBREAKFAST\nM5\nLine: " + str.tostring(linePrice, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick), style=label.style_label_up, color=i_col_buy, textcolor=color.white)
 
-        drawTPSL(true, entry, sl, tp1, tp2, "B BUY")
+        drawTPSL(linePrice, sl, tp, "B BUY")
 
         if enableAlerts
-            alert("BUY Breakfast M5 Strict Breakout", alert.freq_once_per_bar_close)
+            alert("BUY Breakfast M5 Strict Breakout | Line Price: " + str.tostring(linePrice, format.mintick) + " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(tp, format.mintick), alert.freq_once_per_bar_close)
 
         b_done := true
 
     else if sellBreakB and trendSellOK
-        entry = m5_close
-        sl    = b_high
-        tp1   = entry - b_range * tp1RR
-        tp2   = entry - b_range * tp2RR
+        linePrice = b_low
+        sl        = b_high
+        tp        = linePrice - tpPoints
 
-        label.new(bar_index, high, "SELL\nBREAKFAST\nM5", style=label.style_label_down, color=i_col_sell, textcolor=color.white)
+        label.new(bar_index, high, "SELL\nBREAKFAST\nM5\nLine: " + str.tostring(linePrice, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick), style=label.style_label_down, color=i_col_sell, textcolor=color.white)
 
-        drawTPSL(false, entry, sl, tp1, tp2, "B SELL")
+        drawTPSL(linePrice, sl, tp, "B SELL")
 
         if enableAlerts
-            alert("SELL Breakfast M5 Strict Breakout", alert.freq_once_per_bar_close)
+            alert("SELL Breakfast M5 Strict Breakout | Line Price: " + str.tostring(linePrice, format.mintick) + " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(tp, format.mintick), alert.freq_once_per_bar_close)
 
         b_done := true
 
@@ -230,38 +223,34 @@ if isM5Chart and condB and not b_done and not na(b_high) and not na(b_low)
 // LUNCH SIGNAL
 // =======================================================
 if isM5Chart and condL and not l_done and not na(l_high) and not na(l_low)
-    l_range = l_high - l_low
-
     buyBreakL  = m5_low > l_high
     sellBreakL = m5_high < l_low
 
     if buyBreakL and trendBuyOK
-        entry = m5_close
-        sl    = l_low
-        tp1   = entry + l_range * tp1RR
-        tp2   = entry + l_range * tp2RR
+        linePrice = l_high
+        sl        = l_low
+        tp        = linePrice + tpPoints
 
-        label.new(bar_index, low, "BUY\nLUNCH\nM5", style=label.style_label_up, color=i_col_buy, textcolor=color.white)
+        label.new(bar_index, low, "BUY\nLUNCH\nM5\nLine: " + str.tostring(linePrice, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick), style=label.style_label_up, color=i_col_buy, textcolor=color.white)
 
-        drawTPSL(true, entry, sl, tp1, tp2, "L BUY")
+        drawTPSL(linePrice, sl, tp, "L BUY")
 
         if enableAlerts
-            alert("BUY Lunch M5 Strict Breakout", alert.freq_once_per_bar_close)
+            alert("BUY Lunch M5 Strict Breakout | Line Price: " + str.tostring(linePrice, format.mintick) + " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(tp, format.mintick), alert.freq_once_per_bar_close)
 
         l_done := true
 
     else if sellBreakL and trendSellOK
-        entry = m5_close
-        sl    = l_high
-        tp1   = entry - l_range * tp1RR
-        tp2   = entry - l_range * tp2RR
+        linePrice = l_low
+        sl        = l_high
+        tp        = linePrice - tpPoints
 
-        label.new(bar_index, high, "SELL\nLUNCH\nM5", style=label.style_label_down, color=i_col_sell, textcolor=color.white)
+        label.new(bar_index, high, "SELL\nLUNCH\nM5\nLine: " + str.tostring(linePrice, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick), style=label.style_label_down, color=i_col_sell, textcolor=color.white)
 
-        drawTPSL(false, entry, sl, tp1, tp2, "L SELL")
+        drawTPSL(linePrice, sl, tp, "L SELL")
 
         if enableAlerts
-            alert("SELL Lunch M5 Strict Breakout", alert.freq_once_per_bar_close)
+            alert("SELL Lunch M5 Strict Breakout | Line Price: " + str.tostring(linePrice, format.mintick) + " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(tp, format.mintick), alert.freq_once_per_bar_close)
 
         l_done := true
 
@@ -269,38 +258,34 @@ if isM5Chart and condL and not l_done and not na(l_high) and not na(l_low)
 // DINNER SIGNAL
 // =======================================================
 if isM5Chart and condD and not d_done and not na(d_high) and not na(d_low)
-    d_range = d_high - d_low
-
     buyBreakD  = m5_low > d_high
     sellBreakD = m5_high < d_low
 
     if buyBreakD and trendBuyOK
-        entry = m5_close
-        sl    = d_low
-        tp1   = entry + d_range * tp1RR
-        tp2   = entry + d_range * tp2RR
+        linePrice = d_high
+        sl        = d_low
+        tp        = linePrice + tpPoints
 
-        label.new(bar_index, low, "BUY\nDINNER\nM5", style=label.style_label_up, color=i_col_buy, textcolor=color.white)
+        label.new(bar_index, low, "BUY\nDINNER\nM5\nLine: " + str.tostring(linePrice, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick), style=label.style_label_up, color=i_col_buy, textcolor=color.white)
 
-        drawTPSL(true, entry, sl, tp1, tp2, "D BUY")
+        drawTPSL(linePrice, sl, tp, "D BUY")
 
         if enableAlerts
-            alert("BUY Dinner M5 Strict Breakout", alert.freq_once_per_bar_close)
+            alert("BUY Dinner M5 Strict Breakout | Line Price: " + str.tostring(linePrice, format.mintick) + " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(tp, format.mintick), alert.freq_once_per_bar_close)
 
         d_done := true
 
     else if sellBreakD and trendSellOK
-        entry = m5_close
-        sl    = d_high
-        tp1   = entry - d_range * tp1RR
-        tp2   = entry - d_range * tp2RR
+        linePrice = d_low
+        sl        = d_high
+        tp        = linePrice - tpPoints
 
-        label.new(bar_index, high, "SELL\nDINNER\nM5", style=label.style_label_down, color=i_col_sell, textcolor=color.white)
+        label.new(bar_index, high, "SELL\nDINNER\nM5\nLine: " + str.tostring(linePrice, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick), style=label.style_label_down, color=i_col_sell, textcolor=color.white)
 
-        drawTPSL(false, entry, sl, tp1, tp2, "D SELL")
+        drawTPSL(linePrice, sl, tp, "D SELL")
 
         if enableAlerts
-            alert("SELL Dinner M5 Strict Breakout", alert.freq_once_per_bar_close)
+            alert("SELL Dinner M5 Strict Breakout | Line Price: " + str.tostring(linePrice, format.mintick) + " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(tp, format.mintick), alert.freq_once_per_bar_close)
 
         d_done := true
 
@@ -344,7 +329,7 @@ end       = isUp ? lastHigh : isDown ? lastLow : na
 startTime = isUp ? lastLowTime : isDown ? lastHighTime : na
 
 fibRange = haveSwing ? math.abs(end - start) : na
-futureTime = startTime + int((time - startTime) * 1.3)
+futureTime = haveSwing ? startTime + int((time - startTime) * 1.3) : na
 
 fib0   = end
 fib236 = isUp ? end - fibRange * 0.236 : end + fibRange * 0.236
