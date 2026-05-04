@@ -1,0 +1,698 @@
+//@version=5
+indicator("RSS SRR Buy Sell Alert + Auto Fib PRO + EMA Trend Filter", overlay=true, max_lines_count=500, max_labels_count=500)
+
+//=========================
+// INPUT
+//=========================
+pivotLen       = input.int(3, "Pivot Length", minval=1)
+showSRR        = input.bool(true, "Show SRR Buy Setup")
+showRSS        = input.bool(true, "Show RSS Sell Setup")
+lineExtendBars = input.int(5, "Line Extend Bars", minval=1)
+showLabels     = input.bool(true, "Show Labels")
+useCloseBreak  = input.bool(true, "Use Body Close For Breakout")
+enableAlerts   = input.bool(true, "Enable Alerts")
+
+minBreakPips = input.float(30, "Min Break Candle (pips)")
+
+//=========================
+// TREND FILTER EMA
+// SAMA MACAM BREAKFAST LUNCH DINNER
+//=========================
+useTrendFilter   = input.bool(true, "Use Trend Filter EMA")
+trendTF          = input.timeframe("5", "Trend EMA Timeframe")
+emaLen           = input.int(50, "EMA Length", minval=1)
+showEMA          = input.bool(true, "Show EMA")
+showTrendBlocked = input.bool(true, "Show Trend Blocked Label")
+
+trendClose = request.security(syminfo.tickerid, trendTF, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+trendEMA   = request.security(syminfo.tickerid, trendTF, ta.ema(close, emaLen), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+trendBuyOK  = not useTrendFilter or trendClose > trendEMA
+trendSellOK = not useTrendFilter or trendClose < trendEMA
+
+plot(showEMA ? trendEMA : na, title="EMA Trend Filter", color=color.yellow, linewidth=2)
+
+//=========================
+// AUTO FIB PRO SETTINGS
+//=========================
+showFib     = input.bool(true, "Show Auto Fibonacci")
+fibTF       = input.timeframe("240", "Fibonacci TF")
+fibPivotLen = input.int(4, "Fib Pivot Length", minval=1)
+
+//=========================
+// H1 SNR VALIDATION
+//=========================
+useH1Validation   = input.bool(true, "Validate With H1 SNR")
+h1TF              = input.timeframe("60", "SNR Validation Timeframe")
+h1PivotLen        = input.int(4, "H1 SNR Pivot Length", minval=1)
+h1ZonePips        = input.float(20, "H1 SNR Zone Tolerance (pips)")
+h1BreakBufferPips = input.float(0, "H1 Break Buffer (pips)")
+maxH1Levels       = input.int(30, "Max H1 SNR Levels Stored", minval=5)
+showBlocked       = input.bool(true, "Show Blocked Break")
+
+//=========================
+// RETEST CONFIRMATION
+//=========================
+confirmAfterRetest  = input.bool(true, "Confirm Only After Retest")
+retestZonePips      = input.float(10, "Retest Zone Tolerance (pips)")
+maxRetestBars       = input.int(20, "Max Bars To Wait Retest", minval=1)
+requireRejectCandle = input.bool(true, "Require Rejection Candle")
+showPendingSetup    = input.bool(true, "Show Pending Retest Line")
+showFailedRetest    = input.bool(false, "Show Failed Retest Label")
+
+//=========================
+// BUY SELL SIGNAL DISPLAY
+//=========================
+showBuySellSignal = input.bool(true, "Show BUY/SELL Signal")
+buySellLabelSize  = input.string("normal", "BUY/SELL Label Size", options=["tiny", "small", "normal", "large"])
+
+//=========================
+// TP SETTING
+//=========================
+tpPoints   = input.float(10.0, "TP Points From RSS/SRR Line", step=0.1)
+showTPLine = input.bool(true, "Show TP Line")
+
+//=========================
+// PIP VALUE
+//=========================
+pipValue = syminfo.mintick * 10
+
+minBreakValue      = minBreakPips * pipValue
+h1ZoneValue        = h1ZonePips * pipValue
+h1BreakBufferValue = h1BreakBufferPips * pipValue
+retestZoneValue    = retestZonePips * pipValue
+
+//=========================
+// LABEL SIZE
+//=========================
+signalSize = buySellLabelSize == "tiny" ? size.tiny : buySellLabelSize == "small" ? size.small : buySellLabelSize == "large" ? size.large : size.normal
+
+//=========================
+// FUNCTIONS
+//=========================
+f_addLevel(float[] arr, float level, float tolerance, int maxLevels) =>
+    bool exists = false
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            if math.abs(array.get(arr, i) - level) <= tolerance
+                exists := true
+    if not exists
+        array.unshift(arr, level)
+        if array.size(arr) > maxLevels
+            array.pop(arr)
+
+f_nearestLevel(float[] arr, float level, float tolerance) =>
+    float nearest = na
+    float minDist = 999999999.0
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            float lvl = array.get(arr, i)
+            float dist = math.abs(lvl - level)
+            if dist <= tolerance and dist < minDist
+                minDist := dist
+                nearest := lvl
+    nearest
+
+//=========================
+// CURRENT TF PIVOT - BODY BASED SNR
+//=========================
+bodyHigh = math.max(open, close)
+bodyLow  = math.min(open, close)
+
+ph = ta.pivothigh(bodyHigh, pivotLen, pivotLen)
+pl = ta.pivotlow(bodyLow, pivotLen, pivotLen)
+
+var float lastResistance = na
+var int   lastResistanceBar = na
+var float lastSupport = na
+var int   lastSupportBar = na
+
+if not na(ph)
+    lastResistance := ph
+    lastResistanceBar := bar_index - pivotLen
+
+if not na(pl)
+    lastSupport := pl
+    lastSupportBar := bar_index - pivotLen
+
+//=========================
+// H1 SNR DETECTION - BODY BASED
+//=========================
+h1PH = request.security(
+     syminfo.tickerid,
+     h1TF,
+     ta.pivothigh(math.max(open, close), h1PivotLen, h1PivotLen),
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off)
+
+h1PL = request.security(
+     syminfo.tickerid,
+     h1TF,
+     ta.pivotlow(math.min(open, close), h1PivotLen, h1PivotLen),
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off)
+
+var float[] h1ResistanceLevels = array.new_float()
+var float[] h1SupportLevels    = array.new_float()
+
+if not na(h1PH)
+    f_addLevel(h1ResistanceLevels, h1PH, h1ZoneValue, maxH1Levels)
+
+if not na(h1PL)
+    f_addLevel(h1SupportLevels, h1PL, h1ZoneValue, maxH1Levels)
+
+//=========================
+// BREAKOUT CONDITIONS - BODY BREAK ONLY
+//=========================
+bodyBreakAboveResistance = not na(lastResistance) and open <= lastResistance and close > lastResistance
+bodyBreakBelowSupport    = not na(lastSupport) and open >= lastSupport and close < lastSupport
+
+breakAboveResistance = useCloseBreak ? bodyBreakAboveResistance : not na(lastResistance) and high > lastResistance
+breakBelowSupport    = useCloseBreak ? bodyBreakBelowSupport : not na(lastSupport) and low < lastSupport
+
+//=========================
+// STRICT BREAK CANDLE
+//=========================
+breakCandleUp   = not na(lastResistance) and (close - lastResistance) >= minBreakValue
+breakCandleDown = not na(lastSupport) and (lastSupport - close) >= minBreakValue
+
+validBreakUp   = breakAboveResistance and breakCandleUp
+validBreakDown = breakBelowSupport and breakCandleDown
+
+//=========================
+// AVOID DUPLICATE BREAK LEVEL
+//=========================
+var float lastProcessedResistanceBreak = na
+var float lastProcessedSupportBreak    = na
+
+rawBreakResistance = validBreakUp and (na(lastProcessedResistanceBreak) or lastProcessedResistanceBreak != lastResistance)
+rawBreakSupport    = validBreakDown and (na(lastProcessedSupportBreak) or lastProcessedSupportBreak != lastSupport)
+
+//=========================
+// H1 VALIDATION
+//=========================
+nearestH1Resistance = f_nearestLevel(h1ResistanceLevels, lastResistance, h1ZoneValue)
+nearestH1Support    = f_nearestLevel(h1SupportLevels, lastSupport, h1ZoneValue)
+
+hasNearbyH1Resistance = rawBreakResistance and not na(nearestH1Resistance)
+hasNearbyH1Support    = rawBreakSupport and not na(nearestH1Support)
+
+h1ResistanceBroken = hasNearbyH1Resistance and close > nearestH1Resistance + h1BreakBufferValue
+h1SupportBroken    = hasNearbyH1Support and close < nearestH1Support - h1BreakBufferValue
+
+h1ResistanceBlocking = useH1Validation and hasNearbyH1Resistance and not h1ResistanceBroken
+h1SupportBlocking    = useH1Validation and hasNearbyH1Support and not h1SupportBroken
+
+//=========================
+// TREND FILTER BLOCKING
+// SRR BUY = break resistance kena ikut BUY trend
+// RSS SELL = break support kena ikut SELL trend
+//=========================
+trendBlockingSRR = rawBreakResistance and not trendBuyOK
+trendBlockingRSS = rawBreakSupport and not trendSellOK
+
+breakResistanceAllowed = rawBreakResistance and not h1ResistanceBlocking and trendBuyOK
+breakSupportAllowed    = rawBreakSupport and not h1SupportBlocking and trendSellOK
+
+//=========================
+// SEQUENCE STORAGE
+// RSS = Resistance, Support, Support = SELL
+// SRR = Support, Resistance, Resistance = BUY
+//=========================
+var int rssCount = 0
+var float rssStartResistance = na
+var int rssStartResistanceBar = na
+var float rssSupport1 = na
+var int rssSupport1Bar = na
+var float rssSupport2 = na
+var int rssSupport2Bar = na
+
+var int srrCount = 0
+var float srrStartSupport = na
+var int srrStartSupportBar = na
+var float srrResistance1 = na
+var int srrResistance1Bar = na
+var float srrResistance2 = na
+var int srrResistance2Bar = na
+
+//=========================
+// PENDING RETEST STORAGE
+//=========================
+var float pendingRSSLevel = na
+var int   pendingRSSLevelBar = na
+var int   pendingRSSStartBar = na
+
+var float pendingSRRLevel = na
+var int   pendingSRRLevelBar = na
+var int   pendingSRRStartBar = na
+
+//=========================
+// BUY / SELL SIGNAL BOOL
+//=========================
+buySignal = false
+sellSignal = false
+
+//=========================
+// RSS SEQUENCE - SELL
+// Need: Resistance exists, then break Support 1, then break Support 2
+// Entry line = Support 2 yang sudah pecah become Resistance
+//=========================
+bool newRSSSetup = false
+float rssLinePrice = na
+int rssLineBar = na
+
+if showRSS and breakSupportAllowed and not na(lastResistance)
+    srrCount := 0
+    srrStartSupport := na
+    srrStartSupportBar := na
+    srrResistance1 := na
+    srrResistance1Bar := na
+    srrResistance2 := na
+    srrResistance2Bar := na
+
+    if rssCount == 0
+        rssStartResistance := lastResistance
+        rssStartResistanceBar := lastResistanceBar
+        rssSupport1 := lastSupport
+        rssSupport1Bar := lastSupportBar
+        rssCount := 1
+
+        if showLabels
+            label.new(bar_index, lastSupport, "RSS S1 BROKEN\nEMA Trend OK", style=label.style_label_down, color=color.rgb(255, 82, 82, 80), textcolor=color.white)
+
+    else if rssCount == 1 and not na(rssSupport1) and lastSupport != rssSupport1
+        rssSupport2 := lastSupport
+        rssSupport2Bar := lastSupportBar
+        rssCount := 2
+
+        newRSSSetup := true
+        rssLinePrice := rssSupport2
+        rssLineBar := rssSupport2Bar
+
+    lastProcessedSupportBreak := lastSupport
+
+//=========================
+// SRR SEQUENCE - BUY
+// Need: Support exists, then break Resistance 1, then break Resistance 2
+// Entry line = Resistance 2 yang sudah pecah become Support
+//=========================
+bool newSRRSetup = false
+float srrLinePrice = na
+int srrLineBar = na
+
+if showSRR and breakResistanceAllowed and not na(lastSupport)
+    rssCount := 0
+    rssStartResistance := na
+    rssStartResistanceBar := na
+    rssSupport1 := na
+    rssSupport1Bar := na
+    rssSupport2 := na
+    rssSupport2Bar := na
+
+    if srrCount == 0
+        srrStartSupport := lastSupport
+        srrStartSupportBar := lastSupportBar
+        srrResistance1 := lastResistance
+        srrResistance1Bar := lastResistanceBar
+        srrCount := 1
+
+        if showLabels
+            label.new(bar_index, lastResistance, "SRR R1 BROKEN\nEMA Trend OK", style=label.style_label_up, color=color.rgb(0, 230, 119, 80), textcolor=color.black)
+
+    else if srrCount == 1 and not na(srrResistance1) and lastResistance != srrResistance1
+        srrResistance2 := lastResistance
+        srrResistance2Bar := lastResistanceBar
+        srrCount := 2
+
+        newSRRSetup := true
+        srrLinePrice := srrResistance2
+        srrLineBar := srrResistance2Bar
+
+    lastProcessedResistanceBreak := lastResistance
+    
+//=========================
+// CREATE RSS CANDIDATE / SELL
+//=========================
+if newRSSSetup
+    if confirmAfterRetest
+        pendingRSSLevel := rssLinePrice
+        pendingRSSLevelBar := rssLineBar
+        pendingRSSStartBar := bar_index
+
+        if showPendingSetup
+            line.new(rssLineBar, rssLinePrice, bar_index + lineExtendBars, rssLinePrice, color=color.rgb(255, 82, 82), width=1, style=line.style_dotted)
+
+        if showLabels
+            label.new(bar_index, rssLinePrice, "RSS WAIT RETEST\nS2 Become Resistance\nEMA Trend OK", style=label.style_label_down, color=color.rgb(255, 82, 82, 70), textcolor=color.white)
+    else
+        sellSignal := true
+
+        sellLinePrice = rssLinePrice
+        sellTPPrice   = sellLinePrice - tpPoints
+
+        line.new(rssLineBar, sellLinePrice, bar_index + lineExtendBars, sellLinePrice, color=color.rgb(255, 82, 82), width=2)
+
+        if showTPLine
+            line.new(bar_index, sellTPPrice, bar_index + lineExtendBars, sellTPPrice, color=color.blue, width=1, style=line.style_dashed)
+
+        if showLabels and showBuySellSignal
+            label.new(bar_index, sellLinePrice, "SELL\nRSS VALID\nEMA Trend OK\nLine: " + str.tostring(sellLinePrice, format.mintick) + "\nTP: " + str.tostring(sellTPPrice, format.mintick), style=label.style_label_down, color=color.rgb(255, 82, 82, 20), textcolor=color.white, size=signalSize)
+
+        if showTPLine and showLabels
+            label.new(bar_index, sellTPPrice, "TP\n" + str.tostring(sellTPPrice, format.mintick), style=label.style_label_up, color=color.blue, textcolor=color.white)
+
+        if enableAlerts
+            alert("SELL | RSS VALID | 2 SUPPORT BROKEN | EMA TREND OK" +
+                 " | " + syminfo.ticker +
+                 " | TF: " + timeframe.period +
+                 " | Line Price: " + str.tostring(sellLinePrice, format.mintick) +
+                 " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(sellTPPrice, format.mintick),
+                 alert.freq_once_per_bar_close)
+
+    rssCount := 0
+    rssStartResistance := na
+    rssStartResistanceBar := na
+    rssSupport1 := na
+    rssSupport1Bar := na
+    rssSupport2 := na
+    rssSupport2Bar := na
+
+//=========================
+// CREATE SRR CANDIDATE / BUY
+//=========================
+if newSRRSetup
+    if confirmAfterRetest
+        pendingSRRLevel := srrLinePrice
+        pendingSRRLevelBar := srrLineBar
+        pendingSRRStartBar := bar_index
+
+        if showPendingSetup
+            line.new(srrLineBar, srrLinePrice, bar_index + lineExtendBars, srrLinePrice, color=color.rgb(0, 230, 119), width=1, style=line.style_dotted)
+
+        if showLabels
+            label.new(bar_index, srrLinePrice, "SRR WAIT RETEST\nR2 Become Support\nEMA Trend OK", style=label.style_label_up, color=color.rgb(0, 230, 119, 70), textcolor=color.black)
+    else
+        buySignal := true
+
+        buyLinePrice = srrLinePrice
+        buyTPPrice   = buyLinePrice + tpPoints
+
+        line.new(srrLineBar, buyLinePrice, bar_index + lineExtendBars, buyLinePrice, color=color.rgb(0, 230, 119), width=2)
+
+        if showTPLine
+            line.new(bar_index, buyTPPrice, bar_index + lineExtendBars, buyTPPrice, color=color.blue, width=1, style=line.style_dashed)
+
+        if showLabels and showBuySellSignal
+            label.new(bar_index, buyLinePrice, "BUY\nSRR VALID\nEMA Trend OK\nLine: " + str.tostring(buyLinePrice, format.mintick) + "\nTP: " + str.tostring(buyTPPrice, format.mintick), style=label.style_label_up, color=color.rgb(0, 230, 119, 20), textcolor=color.black, size=signalSize)
+
+        if showTPLine and showLabels
+            label.new(bar_index, buyTPPrice, "TP\n" + str.tostring(buyTPPrice, format.mintick), style=label.style_label_down, color=color.blue, textcolor=color.white)
+
+        if enableAlerts
+            alert("BUY | SRR VALID | 2 RESISTANCE BROKEN | EMA TREND OK" +
+                 " | " + syminfo.ticker +
+                 " | TF: " + timeframe.period +
+                 " | Line Price: " + str.tostring(buyLinePrice, format.mintick) +
+                 " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(buyTPPrice, format.mintick),
+                 alert.freq_once_per_bar_close)
+
+    srrCount := 0
+    srrStartSupport := na
+    srrStartSupportBar := na
+    srrResistance1 := na
+    srrResistance1Bar := na
+    srrResistance2 := na
+    srrResistance2Bar := na
+
+//=========================
+// RETEST CONFIRM RSS = SELL
+//=========================
+hasPendingRSS = not na(pendingRSSLevel)
+
+rssRetestTouched = hasPendingRSS and bar_index > pendingRSSStartBar and high >= pendingRSSLevel - retestZoneValue and low <= pendingRSSLevel + retestZoneValue
+
+rssRejectConfirmed = rssRetestTouched and close < pendingRSSLevel and (not requireRejectCandle or close < open) and trendSellOK
+
+rssFailed = hasPendingRSS and bar_index > pendingRSSStartBar and close > pendingRSSLevel + retestZoneValue
+rssExpired = hasPendingRSS and bar_index - pendingRSSStartBar > maxRetestBars
+
+if rssRejectConfirmed
+    sellSignal := true
+
+    sellLinePrice = pendingRSSLevel
+    sellTPPrice   = sellLinePrice - tpPoints
+
+    line.new(pendingRSSLevelBar, sellLinePrice, bar_index + lineExtendBars, sellLinePrice, color=color.rgb(255, 82, 82), width=2)
+
+    if showTPLine
+        line.new(bar_index, sellTPPrice, bar_index + lineExtendBars, sellTPPrice, color=color.blue, width=1, style=line.style_dashed)
+
+    if showLabels and showBuySellSignal
+        label.new(bar_index, high, "SELL\nRSS RETEST CONFIRMED\nEMA Trend OK\nLine: " + str.tostring(sellLinePrice, format.mintick) + "\nTP: " + str.tostring(sellTPPrice, format.mintick), style=label.style_label_down, color=color.rgb(255, 82, 82, 10), textcolor=color.white, size=signalSize)
+
+    if showTPLine and showLabels
+        label.new(bar_index, sellTPPrice, "TP\n" + str.tostring(sellTPPrice, format.mintick), style=label.style_label_up, color=color.blue, textcolor=color.white)
+
+    if enableAlerts
+        alert("SELL | RSS RETEST CONFIRMED | EMA TREND OK" +
+             " | " + syminfo.ticker +
+             " | TF: " + timeframe.period +
+             " | Line Price: " + str.tostring(sellLinePrice, format.mintick) +
+             " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(sellTPPrice, format.mintick),
+             alert.freq_once_per_bar_close)
+
+    pendingRSSLevel := na
+    pendingRSSLevelBar := na
+    pendingRSSStartBar := na
+
+if rssFailed or rssExpired
+    if showFailedRetest
+        labelTextRSSFail = rssFailed ? "RSS FAILED\nPrice Closed Back Above" : "RSS EXPIRED\nNo Retest"
+        label.new(bar_index, pendingRSSLevel, labelTextRSSFail, style=label.style_label_up, color=color.rgb(120, 120, 120, 30), textcolor=color.white)
+
+    pendingRSSLevel := na
+    pendingRSSLevelBar := na
+    pendingRSSStartBar := na
+
+//=========================
+// RETEST CONFIRM SRR = BUY
+//=========================
+hasPendingSRR = not na(pendingSRRLevel)
+
+srrRetestTouched = hasPendingSRR and bar_index > pendingSRRStartBar and low <= pendingSRRLevel + retestZoneValue and high >= pendingSRRLevel - retestZoneValue
+
+srrRejectConfirmed = srrRetestTouched and close > pendingSRRLevel and (not requireRejectCandle or close > open) and trendBuyOK
+
+srrFailed = hasPendingSRR and bar_index > pendingSRRStartBar and close < pendingSRRLevel - retestZoneValue
+srrExpired = hasPendingSRR and bar_index - pendingSRRStartBar > maxRetestBars
+
+if srrRejectConfirmed
+    buySignal := true
+
+    buyLinePrice = pendingSRRLevel
+    buyTPPrice   = buyLinePrice + tpPoints
+
+    line.new(pendingSRRLevelBar, buyLinePrice, bar_index + lineExtendBars, buyLinePrice, color=color.rgb(0, 230, 119), width=2)
+
+    if showTPLine
+        line.new(bar_index, buyTPPrice, bar_index + lineExtendBars, buyTPPrice, color=color.blue, width=1, style=line.style_dashed)
+
+    if showLabels and showBuySellSignal
+        label.new(bar_index, low, "BUY\nSRR RETEST CONFIRMED\nEMA Trend OK\nLine: " + str.tostring(buyLinePrice, format.mintick) + "\nTP: " + str.tostring(buyTPPrice, format.mintick), style=label.style_label_up, color=color.rgb(0, 230, 119, 10), textcolor=color.black, size=signalSize)
+
+    if showTPLine and showLabels
+        label.new(bar_index, buyTPPrice, "TP\n" + str.tostring(buyTPPrice, format.mintick), style=label.style_label_down, color=color.blue, textcolor=color.white)
+
+    if enableAlerts
+        alert("BUY | SRR RETEST CONFIRMED | EMA TREND OK" +
+             " | " + syminfo.ticker +
+             " | TF: " + timeframe.period +
+             " | Line Price: " + str.tostring(buyLinePrice, format.mintick) +
+             " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(buyTPPrice, format.mintick),
+             alert.freq_once_per_bar_close)
+
+    pendingSRRLevel := na
+    pendingSRRLevelBar := na
+    pendingSRRStartBar := na
+
+if srrFailed or srrExpired
+    if showFailedRetest
+        labelTextSRRFail = srrFailed ? "SRR FAILED\nPrice Closed Back Below" : "SRR EXPIRED\nNo Retest"
+        label.new(bar_index, pendingSRRLevel, labelTextSRRFail, style=label.style_label_down, color=color.rgb(120, 120, 120, 30), textcolor=color.white)
+
+    pendingSRRLevel := na
+    pendingSRRLevelBar := na
+    pendingSRRStartBar := na
+
+//=========================
+// DRAW BLOCKED BREAK RESISTANCE - H1
+//=========================
+if showBlocked and h1ResistanceBlocking
+    line.new(lastResistanceBar, lastResistance, bar_index + lineExtendBars, lastResistance, color=color.rgb(255, 193, 7), width=2, style=line.style_dashed)
+
+    if showLabels
+        label.new(bar_index, lastResistance, "SRR BREAK BLOCKED\nH1 Resistance Still Holding\n" + str.tostring(nearestH1Resistance), style=label.style_label_down, color=color.rgb(255, 193, 7, 20), textcolor=color.black)
+
+    lastProcessedResistanceBreak := lastResistance
+
+//=========================
+// DRAW BLOCKED BREAK SUPPORT - H1
+//=========================
+if showBlocked and h1SupportBlocking
+    line.new(lastSupportBar, lastSupport, bar_index + lineExtendBars, lastSupport, color=color.rgb(255, 193, 7), width=2, style=line.style_dashed)
+
+    if showLabels
+        label.new(bar_index, lastSupport, "RSS BREAK BLOCKED\nH1 Support Still Holding\n" + str.tostring(nearestH1Support), style=label.style_label_up, color=color.rgb(255, 193, 7, 20), textcolor=color.black)
+
+    lastProcessedSupportBreak := lastSupport
+
+//=========================
+// DRAW BLOCKED BY EMA TREND
+//=========================
+if showTrendBlocked and trendBlockingSRR
+    line.new(lastResistanceBar, lastResistance, bar_index + lineExtendBars, lastResistance, color=color.rgb(156, 39, 176), width=2, style=line.style_dashed)
+
+    if showLabels
+        label.new(bar_index, lastResistance, "SRR BREAK BLOCKED\nEMA Trend Not BUY", style=label.style_label_down, color=color.rgb(156, 39, 176, 20), textcolor=color.white)
+
+    lastProcessedResistanceBreak := lastResistance
+
+if showTrendBlocked and trendBlockingRSS
+    line.new(lastSupportBar, lastSupport, bar_index + lineExtendBars, lastSupport, color=color.rgb(156, 39, 176), width=2, style=line.style_dashed)
+
+    if showLabels
+        label.new(bar_index, lastSupport, "RSS BREAK BLOCKED\nEMA Trend Not SELL", style=label.style_label_up, color=color.rgb(156, 39, 176, 20), textcolor=color.white)
+
+    lastProcessedSupportBreak := lastSupport
+
+//=========================
+// ALERT BLOCKED
+//=========================
+if enableAlerts and h1ResistanceBlocking
+    alert("SRR BREAK BLOCKED | H1 Resistance Still Holding | " + syminfo.ticker + " | TF: " + timeframe.period + " | Resistance Price: " + str.tostring(lastResistance, format.mintick) + " | H1 Resistance: " + str.tostring(nearestH1Resistance, format.mintick), alert.freq_once_per_bar_close)
+
+if enableAlerts and h1SupportBlocking
+    alert("RSS BREAK BLOCKED | H1 Support Still Holding | " + syminfo.ticker + " | TF: " + timeframe.period + " | Support Price: " + str.tostring(lastSupport, format.mintick) + " | H1 Support: " + str.tostring(nearestH1Support, format.mintick), alert.freq_once_per_bar_close)
+
+if enableAlerts and trendBlockingSRR
+    alert("SRR BREAK BLOCKED | EMA Trend Not BUY | " + syminfo.ticker + " | TF: " + timeframe.period + " | Resistance Price: " + str.tostring(lastResistance, format.mintick), alert.freq_once_per_bar_close)
+
+if enableAlerts and trendBlockingRSS
+    alert("RSS BREAK BLOCKED | EMA Trend Not SELL | " + syminfo.ticker + " | TF: " + timeframe.period + " | Support Price: " + str.tostring(lastSupport, format.mintick), alert.freq_once_per_bar_close)
+
+//=======================================================
+// AUTO FIB PRO
+// SAMA MACAM SCRIPT BREAKFAST LUNCH DINNER
+//=======================================================
+htfHigh = request.security(syminfo.tickerid, fibTF, ta.pivothigh(high, fibPivotLen, fibPivotLen), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htfLow  = request.security(syminfo.tickerid, fibTF, ta.pivotlow(low, fibPivotLen, fibPivotLen), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+htfHighTime = request.security(
+     syminfo.tickerid,
+     fibTF,
+     not na(ta.pivothigh(high, fibPivotLen, fibPivotLen)) ? time[fibPivotLen] : na,
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off)
+
+htfLowTime = request.security(
+     syminfo.tickerid,
+     fibTF,
+     not na(ta.pivotlow(low, fibPivotLen, fibPivotLen)) ? time[fibPivotLen] : na,
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off)
+
+var float lastHigh = na
+var float lastLow = na
+var int lastHighTime = na
+var int lastLowTime = na
+
+if not na(htfHigh)
+    lastHigh := htfHigh
+    lastHighTime := int(htfHighTime)
+
+if not na(htfLow)
+    lastLow := htfLow
+    lastLowTime := int(htfLowTime)
+
+haveSwing = not na(lastHigh) and not na(lastLow) and not na(lastHighTime) and not na(lastLowTime)
+
+isUp   = haveSwing and lastHighTime > lastLowTime
+isDown = haveSwing and lastLowTime > lastHighTime
+
+start     = isUp ? lastLow : isDown ? lastHigh : na
+end       = isUp ? lastHigh : isDown ? lastLow : na
+startTime = isUp ? lastLowTime : isDown ? lastHighTime : na
+
+fibRange = haveSwing ? math.abs(end - start) : na
+futureTime = haveSwing ? startTime + int((time - startTime) * 1.3) : na
+
+fib0   = end
+fib236 = isUp ? end - fibRange * 0.236 : end + fibRange * 0.236
+fib382 = isUp ? end - fibRange * 0.382 : end + fibRange * 0.382
+fib500 = isUp ? end - fibRange * 0.5   : end + fibRange * 0.5
+fib618 = isUp ? end - fibRange * 0.618 : end + fibRange * 0.618
+fib786 = isUp ? end - fibRange * 0.786 : end + fibRange * 0.786
+fib1   = start
+
+var line l0 = na
+var line l236 = na
+var line l382 = na
+var line l500 = na
+var line l618 = na
+var line l786 = na
+var line l1 = na
+
+var label lb0 = na
+var label lb236 = na
+var label lb382 = na
+var label lb500 = na
+var label lb618 = na
+var label lb786 = na
+var label lb1 = na
+
+deleteFib() =>
+    line.delete(l0)
+    line.delete(l236)
+    line.delete(l382)
+    line.delete(l500)
+    line.delete(l618)
+    line.delete(l786)
+    line.delete(l1)
+
+    label.delete(lb0)
+    label.delete(lb236)
+    label.delete(lb382)
+    label.delete(lb500)
+    label.delete(lb618)
+    label.delete(lb786)
+    label.delete(lb1)
+
+if barstate.islast
+    if not showFib
+        deleteFib()
+
+    if showFib and haveSwing
+        deleteFib()
+
+        l0   := line.new(startTime, fib0,   futureTime, fib0,   xloc=xloc.bar_time, color=color.gray)
+        l236 := line.new(startTime, fib236, futureTime, fib236, xloc=xloc.bar_time, color=color.gray)
+        l382 := line.new(startTime, fib382, futureTime, fib382, xloc=xloc.bar_time, color=color.gray)
+        l500 := line.new(startTime, fib500, futureTime, fib500, xloc=xloc.bar_time, color=color.gray)
+        l618 := line.new(startTime, fib618, futureTime, fib618, xloc=xloc.bar_time, color=color.orange, width=2)
+        l786 := line.new(startTime, fib786, futureTime, fib786, xloc=xloc.bar_time, color=color.gray)
+        l1   := line.new(startTime, fib1,   futureTime, fib1,   xloc=xloc.bar_time, color=color.gray)
+
+        lb0   := label.new(futureTime, fib0,   "0",     xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+        lb236 := label.new(futureTime, fib236, "23.6",  xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+        lb382 := label.new(futureTime, fib382, "38.2",  xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+        lb500 := label.new(futureTime, fib500, "50.0",  xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+        lb618 := label.new(futureTime, fib618, "61.8",  xloc=xloc.bar_time, style=label.style_label_left, color=color.orange, textcolor=color.white)
+        lb786 := label.new(futureTime, fib786, "78.6",  xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+        lb1   := label.new(futureTime, fib1,   "100",   xloc=xloc.bar_time, style=label.style_label_left, color=color.gray, textcolor=color.white)
+
+//=========================
+// ALERTCONDITION BACKUP
+// Pilih "Any alert() function call" untuk alert lengkap.
+//=========================
+alertcondition(buySignal, title="BUY Signal - SRR", message="BUY | SRR VALID | EMA TREND OK")
+alertcondition(sellSignal, title="SELL Signal - RSS", message="SELL | RSS VALID | EMA TREND OK")
