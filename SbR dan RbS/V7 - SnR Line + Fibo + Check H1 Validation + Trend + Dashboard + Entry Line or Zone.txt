@@ -1,0 +1,681 @@
+//@version=5
+indicator("RBS SBR M15 Setup + M5 Entry Signal + H1 M30 Filter", overlay=true, max_lines_count=500, max_labels_count=500)
+
+//=========================
+// INPUT
+//=========================
+pivotLen       = input.int(3, "Pivot Length", minval=1)
+showRBS        = input.bool(true, "Show RBS / RB Buy Setup")
+showSBR        = input.bool(true, "Show SBR / RS Sell Setup")
+lineExtendBars = input.int(30, "Line Extend Bars", minval=1)
+showLabels     = input.bool(true, "Show Labels")
+enableAlerts   = input.bool(true, "Enable Alerts")
+
+//=========================
+// AUTO HTF FILTER
+// Alert hanya keluar bila H1 + M30 sehala
+//=========================
+useHTFFilter  = input.bool(true, "Use H1 + M30 Trend Filter")
+h1TF          = input.timeframe("60", "H1 Filter Timeframe")
+m30TF         = input.timeframe("30", "M30 Filter Timeframe")
+emaFastLen    = input.int(50, "EMA Fast Length", minval=1)
+emaSlowLen    = input.int(200, "EMA Slow Length", minval=1)
+showDashboard = input.bool(true, "Show Bias Dashboard")
+
+//=========================
+// M5 ENTRY CONFIRMATION
+// Setup ikut chart TF.
+// Signal entry ikut M5 close.
+//=========================
+entryConfirmTF = input.timeframe("5", "Entry Confirmation TF")
+
+//=========================
+// ENTRY MODE
+//=========================
+showBuyLineSignal  = input.bool(true, "Show BUY LINE Signal")
+showBuyDZSignal    = input.bool(true, "Show BUY DZ Signal")
+showSellLineSignal = input.bool(true, "Show SELL LINE Signal")
+showSellSZSignal   = input.bool(true, "Show SELL SZ Signal")
+
+//=========================
+// ZONE CALC SETTINGS
+// Box/highlight tak dilukis. Ini cuma untuk kira DZ/SZ sahaja.
+//=========================
+zoneLookback     = input.int(12, "Zone Search Lookback Before RB/RS", minval=3, maxval=100)
+zoneBaseCandles  = input.int(4, "Zone Base Candles", minval=1, maxval=20)
+
+//=========================
+// CONFIRM SETTINGS
+//=========================
+confirmMode = input.string(
+     "Rejection Or Engulfing",
+     "Confirmation Mode",
+     options=["Rejection Only", "Engulfing Only", "Rejection Or Engulfing"])
+
+lineTolerancePips = input.float(8, "Line Retest Tolerance Pips", step=1)
+zoneTolerancePips = input.float(8, "Zone Retest Tolerance Pips", step=1)
+wickRejectMult    = input.float(0.40, "Rejection Wick Multiplier", step=0.10)
+allowFlexibleEngulfing = input.bool(true, "Allow Flexible Engulfing")
+
+//=========================
+// FAIL LINE RULE
+//=========================
+requireLineFailForZoneEntry = input.bool(true, "Require Line Failed Before Zone Entry")
+maxBarsAfterRBRS = input.int(15, "Max M15 Bars After RB/RS For Entry", minval=1)
+
+//=========================
+// ALERT TP
+//=========================
+tpPoints = input.float(10.0, "TP Points For Alert", step=0.1)
+
+//=========================
+// PIP VALUE
+//=========================
+pipValue = syminfo.mintick * 10
+lineTol = lineTolerancePips * pipValue
+zoneTol = zoneTolerancePips * pipValue
+
+//=========================
+// H1 + M30 TREND FILTER
+//=========================
+h1Close = request.security(syminfo.tickerid, h1TF, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+h1Ema50 = request.security(syminfo.tickerid, h1TF, ta.ema(close, emaFastLen), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+h1Ema200 = request.security(syminfo.tickerid, h1TF, ta.ema(close, emaSlowLen), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+m30Close = request.security(syminfo.tickerid, m30TF, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+m30Ema50 = request.security(syminfo.tickerid, m30TF, ta.ema(close, emaFastLen), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+m30Ema200 = request.security(syminfo.tickerid, m30TF, ta.ema(close, emaSlowLen), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+h1BuyTrend  = h1Close > h1Ema50 and h1Ema50 > h1Ema200
+h1SellTrend = h1Close < h1Ema50 and h1Ema50 < h1Ema200
+
+m30BuyTrend  = m30Close > m30Ema50 and m30Ema50 > m30Ema200
+m30SellTrend = m30Close < m30Ema50 and m30Ema50 < m30Ema200
+
+htfBuyOK  = not useHTFFilter or (h1BuyTrend and m30BuyTrend)
+htfSellOK = not useHTFFilter or (h1SellTrend and m30SellTrend)
+
+h1Text = h1BuyTrend ? "BUY" : h1SellTrend ? "SELL" : "WAIT"
+m30Text = m30BuyTrend ? "BUY" : m30SellTrend ? "SELL" : "WAIT"
+
+biasText = htfBuyOK and useHTFFilter ? "BUY ONLY" :
+     htfSellOK and useHTFFilter ? "SELL ONLY" :
+     useHTFFilter ? "WAIT" : "FILTER OFF"
+
+biasColor = htfBuyOK and useHTFFilter ? color.rgb(0, 230, 119) :
+     htfSellOK and useHTFFilter ? color.rgb(255, 82, 82) :
+     useHTFFilter ? color.rgb(255, 193, 7) :
+     color.rgb(120, 120, 120)
+
+//=========================
+// DASHBOARD
+//=========================
+var table dash = table.new(position.top_right, 2, 5, border_width=1)
+
+if barstate.islast and showDashboard
+    table.cell(dash, 0, 0, "BIAS", text_color=color.white, bgcolor=color.black)
+    table.cell(dash, 1, 0, biasText, text_color=color.black, bgcolor=biasColor)
+
+    table.cell(dash, 0, 1, "H1", text_color=color.white, bgcolor=color.rgb(30, 30, 30))
+    table.cell(
+         dash,
+         1,
+         1,
+         h1Text,
+         text_color=color.white,
+         bgcolor=h1BuyTrend ? color.rgb(0, 120, 60) : h1SellTrend ? color.rgb(150, 30, 30) : color.rgb(120, 90, 0))
+
+    table.cell(dash, 0, 2, "M30", text_color=color.white, bgcolor=color.rgb(30, 30, 30))
+    table.cell(
+         dash,
+         1,
+         2,
+         m30Text,
+         text_color=color.white,
+         bgcolor=m30BuyTrend ? color.rgb(0, 120, 60) : m30SellTrend ? color.rgb(150, 30, 30) : color.rgb(120, 90, 0))
+
+    table.cell(dash, 0, 3, "SETUP TF", text_color=color.white, bgcolor=color.rgb(30, 30, 30))
+    table.cell(dash, 1, 3, timeframe.period, text_color=color.white, bgcolor=color.rgb(30, 30, 30))
+
+    table.cell(dash, 0, 4, "ENTRY TF", text_color=color.white, bgcolor=color.rgb(30, 30, 30))
+    table.cell(dash, 1, 4, entryConfirmTF, text_color=color.white, bgcolor=color.rgb(30, 30, 30))
+
+if barstate.islast and not showDashboard
+    table.clear(dash, 0, 0, 1, 4)
+
+//=========================
+// BODY BASED PIVOT
+//=========================
+bodyHigh = math.max(open, close)
+bodyLow  = math.min(open, close)
+
+ph = ta.pivothigh(bodyHigh, pivotLen, pivotLen)
+pl = ta.pivotlow(bodyLow, pivotLen, pivotLen)
+
+var float lastResistance = na
+var int   lastResistanceBar = na
+
+var float lastSupport = na
+var int   lastSupportBar = na
+
+if not na(ph)
+    lastResistance := ph
+    lastResistanceBar := bar_index - pivotLen
+
+if not na(pl)
+    lastSupport := pl
+    lastSupportBar := bar_index - pivotLen
+
+//=========================
+// BREAKOUT / READY SETUP
+// Setup ikut chart TF, contoh M15.
+//=========================
+rbsBreak = not na(lastResistance) and open <= lastResistance and close > lastResistance
+sbrBreak = not na(lastSupport) and open >= lastSupport and close < lastSupport
+
+var float lastRBSProcessed = na
+var float lastSBRProcessed = na
+
+newRBS = showRBS and rbsBreak and (na(lastRBSProcessed) or lastRBSProcessed != lastResistance)
+newSBR = showSBR and sbrBreak and (na(lastSBRProcessed) or lastSBRProcessed != lastSupport)
+
+//=========================
+// DEMAND / SUPPLY ZONE CALC ONLY
+// Highlight/box tak dilukis.
+//=========================
+int demandLeft = na
+float demandTop = na
+float demandBottom = na
+
+int supplyLeft = na
+float supplyTop = na
+float supplyBottom = na
+
+enoughBars = bar_index > zoneLookback + zoneBaseCandles + 2
+
+if enoughBars
+    lowOffset = ta.lowestbars(low[1], zoneLookback) + 1
+    highOffset = ta.highestbars(high[1], zoneLookback) + 1
+
+    float dTop = na
+    float dBottom = na
+    int dLeft = na
+
+    for i = 0 to zoneBaseCandles - 1
+        off = lowOffset + i
+        if off >= 1 and off <= bar_index
+            bodyTopX = math.max(open[off], close[off])
+            wickLowX = low[off]
+
+            dTop := na(dTop) ? bodyTopX : math.max(dTop, bodyTopX)
+            dBottom := na(dBottom) ? wickLowX : math.min(dBottom, wickLowX)
+            dLeft := bar_index - off
+
+    demandTop := dTop
+    demandBottom := dBottom
+    demandLeft := dLeft
+
+    float sTop = na
+    float sBottom = na
+    int sLeft = na
+
+    for i = 0 to zoneBaseCandles - 1
+        off = highOffset + i
+        if off >= 1 and off <= bar_index
+            wickHighX = high[off]
+            bodyLowX = math.min(open[off], close[off])
+
+            sTop := na(sTop) ? wickHighX : math.max(sTop, wickHighX)
+            sBottom := na(sBottom) ? bodyLowX : math.min(sBottom, bodyLowX)
+            sLeft := bar_index - off
+
+    supplyTop := sTop
+    supplyBottom := sBottom
+    supplyLeft := sLeft
+
+//=========================
+// ACTIVE SETUP STORAGE
+//=========================
+var float activeRBSLine = na
+var int   activeRBSBar = na
+var int   activeRBSReadyTime = na
+var float activeDemandTop = na
+var float activeDemandBottom = na
+varip bool activeRBSLineFailed = false
+varip bool activeRBSLineUsed = false
+varip bool activeDemandUsed = false
+
+var float activeSBRLine = na
+var int   activeSBRBar = na
+var int   activeSBRReadyTime = na
+var float activeSupplyTop = na
+var float activeSupplyBottom = na
+varip bool activeSBRLineFailed = false
+varip bool activeSBRLineUsed = false
+varip bool activeSupplyUsed = false
+
+varip int lastBuyLineM5Time = na
+varip int lastBuyDZM5Time = na
+varip int lastSellLineM5Time = na
+varip int lastSellSZM5Time = na
+
+//=========================
+// CREATE RBS READY
+//=========================
+if newRBS
+    activeRBSLine := lastResistance
+    activeRBSBar := bar_index
+    activeRBSReadyTime := time_close
+    activeDemandTop := demandTop
+    activeDemandBottom := demandBottom
+    activeRBSLineFailed := false
+    activeRBSLineUsed := false
+    activeDemandUsed := false
+    lastBuyLineM5Time := na
+    lastBuyDZM5Time := na
+
+    line.new(
+         lastResistanceBar,
+         lastResistance,
+         bar_index + lineExtendBars,
+         lastResistance,
+         xloc=xloc.bar_index,
+         color=color.lime,
+         width=2)
+
+    if showLabels
+        label.new(
+             bar_index,
+             lastResistance,
+             "RB\nRBS READY",
+             style=label.style_label_up,
+             color=color.lime,
+             textcolor=color.black,
+             size=size.small)
+
+    if enableAlerts
+        alert(
+             "RB | RBS READY | " + syminfo.ticker +
+             " | Setup TF: " + timeframe.period +
+             " | Entry TF: " + entryConfirmTF +
+             " | Line: " + str.tostring(lastResistance, format.mintick) +
+             " | Bias: " + biasText,
+             alert.freq_once_per_bar)
+
+    lastRBSProcessed := lastResistance
+
+//=========================
+// CREATE SBR READY
+//=========================
+if newSBR
+    activeSBRLine := lastSupport
+    activeSBRBar := bar_index
+    activeSBRReadyTime := time_close
+    activeSupplyTop := supplyTop
+    activeSupplyBottom := supplyBottom
+    activeSBRLineFailed := false
+    activeSBRLineUsed := false
+    activeSupplyUsed := false
+    lastSellLineM5Time := na
+    lastSellSZM5Time := na
+
+    line.new(
+         lastSupportBar,
+         lastSupport,
+         bar_index + lineExtendBars,
+         lastSupport,
+         xloc=xloc.bar_index,
+         color=color.red,
+         width=2)
+
+    if showLabels
+        label.new(
+             bar_index,
+             lastSupport,
+             "RS\nSBR READY",
+             style=label.style_label_down,
+             color=color.red,
+             textcolor=color.white,
+             size=size.small)
+
+    if enableAlerts
+        alert(
+             "RS | SBR READY | " + syminfo.ticker +
+             " | Setup TF: " + timeframe.period +
+             " | Entry TF: " + entryConfirmTF +
+             " | Line: " + str.tostring(lastSupport, format.mintick) +
+             " | Bias: " + biasText,
+             alert.freq_once_per_bar)
+
+    lastSBRProcessed := lastSupport
+
+//=========================
+// ACTIVE WINDOW
+//=========================
+rbsActive = not na(activeRBSLine) and not na(activeRBSBar) and bar_index - activeRBSBar <= maxBarsAfterRBRS
+sbrActive = not na(activeSBRLine) and not na(activeSBRBar) and bar_index - activeSBRBar <= maxBarsAfterRBRS
+
+//=========================
+// M5 / LOWER TF DATA
+//=========================
+m5TimeCloseArr = request.security_lower_tf(syminfo.tickerid, entryConfirmTF, time_close)
+m5OpenArr      = request.security_lower_tf(syminfo.tickerid, entryConfirmTF, open)
+m5HighArr      = request.security_lower_tf(syminfo.tickerid, entryConfirmTF, high)
+m5LowArr       = request.security_lower_tf(syminfo.tickerid, entryConfirmTF, low)
+m5CloseArr     = request.security_lower_tf(syminfo.tickerid, entryConfirmTF, close)
+
+m5Size = array.size(m5CloseArr)
+
+//=========================
+// M5 CONFIRM FUNCTIONS
+//=========================
+f_m5BullConfirm(float o, float h, float l, float c, float po, float phh, float pll, float pc, float lineOrTop, float bottom, bool isZone) =>
+    body = math.abs(c - o)
+    lowerWick = math.min(o, c) - l
+
+    prevBodyHigh = math.max(po, pc)
+    prevBodyLow = math.min(po, pc)
+    currBodyHigh = math.max(o, c)
+    currBodyLow = math.min(o, c)
+
+    zoneMid = (lineOrTop + bottom) / 2.0
+
+    touchArea = isZone ?
+         (l <= lineOrTop + zoneTol and h >= bottom - zoneTol) :
+         (l <= lineOrTop + lineTol and h >= lineOrTop - lineTol)
+
+    closeOK = isZone ? c > zoneMid : c > lineOrTop
+    bull = c > o
+
+    rejection =
+         touchArea and
+         bull and
+         closeOK and
+         lowerWick >= body * wickRejectMult
+
+    strictEngulf =
+         bull and
+         pc < po and
+         currBodyLow <= prevBodyLow and
+         currBodyHigh >= prevBodyHigh
+
+    flexEngulf =
+         bull and
+         c > prevBodyHigh
+
+    engulf =
+         touchArea and
+         closeOK and
+         (allowFlexibleEngulfing ? (strictEngulf or flexEngulf) : strictEngulf)
+
+    confirmMode == "Rejection Only" ? rejection :
+     confirmMode == "Engulfing Only" ? engulf :
+     rejection or engulf
+
+f_m5BearConfirm(float o, float h, float l, float c, float po, float phh, float pll, float pc, float lineOrBottom, float top, bool isZone) =>
+    body = math.abs(c - o)
+    upperWick = h - math.max(o, c)
+
+    prevBodyHigh = math.max(po, pc)
+    prevBodyLow = math.min(po, pc)
+    currBodyHigh = math.max(o, c)
+    currBodyLow = math.min(o, c)
+
+    zoneMid = (top + lineOrBottom) / 2.0
+
+    touchArea = isZone ?
+         (h >= lineOrBottom - zoneTol and l <= top + zoneTol) :
+         (h >= lineOrBottom - lineTol and l <= lineOrBottom + lineTol)
+
+    closeOK = isZone ? c < zoneMid : c < lineOrBottom
+    bear = c < o
+
+    rejection =
+         touchArea and
+         bear and
+         closeOK and
+         upperWick >= body * wickRejectMult
+
+    strictEngulf =
+         bear and
+         pc > po and
+         currBodyHigh >= prevBodyHigh and
+         currBodyLow <= prevBodyLow
+
+    flexEngulf =
+         bear and
+         c < prevBodyLow
+
+    engulf =
+         touchArea and
+         closeOK and
+         (allowFlexibleEngulfing ? (strictEngulf or flexEngulf) : strictEngulf)
+
+    confirmMode == "Rejection Only" ? rejection :
+     confirmMode == "Engulfing Only" ? engulf :
+     rejection or engulf
+
+//=========================
+// SIGNAL LOGIC BASED ON M5 CLOSE
+//=========================
+buyLineSignal = false
+buyDZSignal = false
+sellLineSignal = false
+sellSZSignal = false
+
+float buyLineEntry = na
+float buyDZEntry = na
+float sellLineEntry = na
+float sellSZEntry = na
+
+int buyLineTime = na
+int buyDZTime = na
+int sellLineTime = na
+int sellSZTime = na
+
+if m5Size >= 2
+    for i = 1 to m5Size - 1
+        int t = array.get(m5TimeCloseArr, i)
+
+        float o = array.get(m5OpenArr, i)
+        float h = array.get(m5HighArr, i)
+        float l = array.get(m5LowArr, i)
+        float c = array.get(m5CloseArr, i)
+
+        float po = array.get(m5OpenArr, i - 1)
+        float phh = array.get(m5HighArr, i - 1)
+        float pll = array.get(m5LowArr, i - 1)
+        float pc = array.get(m5CloseArr, i - 1)
+
+        bool m5AfterRBS = rbsActive and not na(activeRBSReadyTime) and t >= activeRBSReadyTime
+        bool m5AfterSBR = sbrActive and not na(activeSBRReadyTime) and t >= activeSBRReadyTime
+
+        // line fail based on M5 close
+        if m5AfterRBS and not activeRBSLineFailed and not na(activeRBSLine)
+            if c < activeRBSLine
+                activeRBSLineFailed := true
+
+        if m5AfterSBR and not activeSBRLineFailed and not na(activeSBRLine)
+            if c > activeSBRLine
+                activeSBRLineFailed := true
+
+        // BUY LINE = RBS line masih hold + H1/M30 BUY + M5 confirm
+        bool canBuyLine =
+             m5AfterRBS and
+             htfBuyOK and
+             showBuyLineSignal and
+             not activeRBSLineUsed and
+             not activeRBSLineFailed and
+             not na(activeRBSLine) and
+             (na(lastBuyLineM5Time) or t > lastBuyLineM5Time)
+
+        if canBuyLine and f_m5BullConfirm(o, h, l, c, po, phh, pll, pc, activeRBSLine, activeRBSLine, false) and not buyLineSignal
+            buyLineSignal := true
+            buyLineEntry := c
+            buyLineTime := t
+            activeRBSLineUsed := true
+            lastBuyLineM5Time := t
+
+        // BUY DZ = RBS line gagal hold + demand zone + H1/M30 BUY + M5 confirm
+        bool lineFailBuyOK = requireLineFailForZoneEntry ? activeRBSLineFailed : true
+
+        bool canBuyDZ =
+             m5AfterRBS and
+             htfBuyOK and
+             showBuyDZSignal and
+             not activeDemandUsed and
+             not na(activeDemandTop) and
+             not na(activeDemandBottom) and
+             lineFailBuyOK and
+             (na(lastBuyDZM5Time) or t > lastBuyDZM5Time)
+
+        if canBuyDZ and f_m5BullConfirm(o, h, l, c, po, phh, pll, pc, activeDemandTop, activeDemandBottom, true) and not buyDZSignal
+            buyDZSignal := true
+            buyDZEntry := c
+            buyDZTime := t
+            activeDemandUsed := true
+            lastBuyDZM5Time := t
+
+        // SELL LINE = SBR line masih hold + H1/M30 SELL + M5 confirm
+        bool canSellLine =
+             m5AfterSBR and
+             htfSellOK and
+             showSellLineSignal and
+             not activeSBRLineUsed and
+             not activeSBRLineFailed and
+             not na(activeSBRLine) and
+             (na(lastSellLineM5Time) or t > lastSellLineM5Time)
+
+        if canSellLine and f_m5BearConfirm(o, h, l, c, po, phh, pll, pc, activeSBRLine, activeSBRLine, false) and not sellLineSignal
+            sellLineSignal := true
+            sellLineEntry := c
+            sellLineTime := t
+            activeSBRLineUsed := true
+            lastSellLineM5Time := t
+
+        // SELL SZ = SBR line gagal hold + supply zone + H1/M30 SELL + M5 confirm
+        bool lineFailSellOK = requireLineFailForZoneEntry ? activeSBRLineFailed : true
+
+        bool canSellSZ =
+             m5AfterSBR and
+             htfSellOK and
+             showSellSZSignal and
+             not activeSupplyUsed and
+             not na(activeSupplyTop) and
+             not na(activeSupplyBottom) and
+             lineFailSellOK and
+             (na(lastSellSZM5Time) or t > lastSellSZM5Time)
+
+        if canSellSZ and f_m5BearConfirm(o, h, l, c, po, phh, pll, pc, activeSupplyBottom, activeSupplyTop, true) and not sellSZSignal
+            sellSZSignal := true
+            sellSZEntry := c
+            sellSZTime := t
+            activeSupplyUsed := true
+            lastSellSZM5Time := t
+
+//=========================
+// DRAW FINAL SIGNALS
+// Signal label akan appear pada M15 candle semasa,
+// tetapi trigger berdasarkan M5 close.
+//=========================
+if buyLineSignal
+    tp = buyLineEntry + tpPoints
+
+    label.new(
+         bar_index,
+         low,
+         "BUY LINE\nM5 CLOSE\nH1+M30 BUY\nEntry: " + str.tostring(buyLineEntry, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick),
+         style=label.style_label_up,
+         color=color.rgb(0, 230, 119),
+         textcolor=color.black,
+         size=size.small)
+
+    if enableAlerts
+        alert(
+             "BUY LINE | M5 Close Entry | H1 BUY | M30 BUY | " +
+             syminfo.ticker +
+             " | Setup TF: " + timeframe.period +
+             " | Entry TF: " + entryConfirmTF +
+             " | Entry: " + str.tostring(buyLineEntry, format.mintick) +
+             " | TP: " + str.tostring(tp, format.mintick),
+             alert.freq_once_per_bar)
+
+if buyDZSignal
+    tp = buyDZEntry + tpPoints
+
+    label.new(
+         bar_index,
+         low,
+         "BUY DZ\nM5 CLOSE\nH1+M30 BUY\nEntry: " + str.tostring(buyDZEntry, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick),
+         style=label.style_label_up,
+         color=color.rgb(0, 180, 255),
+         textcolor=color.white,
+         size=size.small)
+
+    if enableAlerts
+        alert(
+             "BUY DZ | M5 Close Entry | H1 BUY | M30 BUY | " +
+             syminfo.ticker +
+             " | Setup TF: " + timeframe.period +
+             " | Entry TF: " + entryConfirmTF +
+             " | Entry: " + str.tostring(buyDZEntry, format.mintick) +
+             " | TP: " + str.tostring(tp, format.mintick),
+             alert.freq_once_per_bar)
+
+if sellLineSignal
+    tp = sellLineEntry - tpPoints
+
+    label.new(
+         bar_index,
+         high,
+         "SELL LINE\nM5 CLOSE\nH1+M30 SELL\nEntry: " + str.tostring(sellLineEntry, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick),
+         style=label.style_label_down,
+         color=color.rgb(255, 82, 82),
+         textcolor=color.white,
+         size=size.small)
+
+    if enableAlerts
+        alert(
+             "SELL LINE | M5 Close Entry | H1 SELL | M30 SELL | " +
+             syminfo.ticker +
+             " | Setup TF: " + timeframe.period +
+             " | Entry TF: " + entryConfirmTF +
+             " | Entry: " + str.tostring(sellLineEntry, format.mintick) +
+             " | TP: " + str.tostring(tp, format.mintick),
+             alert.freq_once_per_bar)
+
+if sellSZSignal
+    tp = sellSZEntry - tpPoints
+
+    label.new(
+         bar_index,
+         high,
+         "SELL SZ\nM5 CLOSE\nH1+M30 SELL\nEntry: " + str.tostring(sellSZEntry, format.mintick) + "\nTP: " + str.tostring(tp, format.mintick),
+         style=label.style_label_down,
+         color=color.rgb(156, 39, 176),
+         textcolor=color.white,
+         size=size.small)
+
+    if enableAlerts
+        alert(
+             "SELL SZ | M5 Close Entry | H1 SELL | M30 SELL | " +
+             syminfo.ticker +
+             " | Setup TF: " + timeframe.period +
+             " | Entry TF: " + entryConfirmTF +
+             " | Entry: " + str.tostring(sellSZEntry, format.mintick) +
+             " | TP: " + str.tostring(tp, format.mintick),
+             alert.freq_once_per_bar)
+
+//=========================
+// PIVOT MARKER
+//=========================
+plotshape(not na(ph), title="Body Pivot High", style=shape.triangledown, location=location.abovebar, color=color.orange, size=size.tiny, offset=-pivotLen)
+plotshape(not na(pl), title="Body Pivot Low", style=shape.triangleup, location=location.belowbar, color=color.aqua, size=size.tiny, offset=-pivotLen)
+
+//=========================
+// ALERTCONDITION BACKUP
+//=========================
+alertcondition(buyLineSignal, title="BUY LINE - M5 Close", message="BUY LINE | M5 Close | H1 + M30 BUY")
+alertcondition(buyDZSignal, title="BUY DZ - M5 Close", message="BUY DZ | M5 Close | H1 + M30 BUY")
+alertcondition(sellLineSignal, title="SELL LINE - M5 Close", message="SELL LINE | M5 Close | H1 + M30 SELL")
+alertcondition(sellSZSignal, title="SELL SZ - M5 Close", message="SELL SZ | M5 Close | H1 + M30 SELL")

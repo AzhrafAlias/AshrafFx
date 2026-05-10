@@ -1,5 +1,5 @@
 //@version=5
-indicator("SBR & RBS Prepare Alert + H4 Fib", overlay=true, max_lines_count=500, max_labels_count=500)
+indicator("SBR & RBS Prepare Alert + H4 Fib + Ready + M1 Touch Buy Sell Alert - NO SPAM", overlay=true, max_lines_count=500, max_labels_count=500)
 
 //=========================
 // INPUT
@@ -16,6 +16,32 @@ showFib       = input.bool(true, "Show Auto Fibonacci")
 showFibLabels = input.bool(true, "Show Fib Labels")
 fibTF         = input.timeframe("240", "Fibonacci Timeframe")
 fibPivotLen   = input.int(4, "Fib Pivot Length", minval=1)
+
+//=========================
+// READY ALERT SETTINGS
+//=========================
+enableReadyAlerts = input.bool(true, "Enable READY BUY / READY SELL Alerts")
+
+//=========================
+// M1 TOUCH ALERT SETTINGS
+//=========================
+touchTF = input.timeframe("1", "Touch Alert Timeframe - M1")
+
+enableRBSTouchAlert    = input.bool(true, "Enable RBS Touch BUY Alert")
+rbsTouchTolerancePips  = input.float(5, "RBS Touch Tolerance (pips)", step=1)
+showRBSTouchLabel      = input.bool(true, "Show RBS Touch BUY Label")
+alertOnlyOncePerRBS    = input.bool(true, "Alert RBS Touch Only Once Per RBS Line")
+
+enableSBRTouchAlert    = input.bool(true, "Enable SBR Touch SELL Alert")
+sbrTouchTolerancePips  = input.float(5, "SBR Touch Tolerance (pips)", step=1)
+showSBRTouchLabel      = input.bool(true, "Show SBR Touch SELL Label")
+alertOnlyOncePerSBR    = input.bool(true, "Alert SBR Touch Only Once Per SBR Line")
+
+showM1DebugLabel = input.bool(false, "Show M1 Touch Debug Label")
+
+pipValue = syminfo.mintick * 10
+rbsTouchToleranceValue = rbsTouchTolerancePips * pipValue
+sbrTouchToleranceValue = sbrTouchTolerancePips * pipValue
 
 //=========================
 // PIVOT DETECTION
@@ -52,12 +78,52 @@ newRBS = breakAboveResistance and (na(lastDrawnRBS) or lastDrawnRBS != lastResis
 newSBR = breakBelowSupport and (na(lastDrawnSBR) or lastDrawnSBR != lastSupport)
 
 //=========================
+// READY SIGNAL BOOL
+//=========================
+readyBuySignal  = newRBS
+readySellSignal = newSBR
+
+//=========================
+// ACTIVE RBS TOUCH STORAGE
+// varip digunakan untuk lock alert semasa realtime recalculation
+//=========================
+var float activeRBSLevel = na
+var int activeRBSBar = na
+var int activeRBSStartTime = na
+varip bool activeRBSTouched = false
+varip int lastRBSTouchM1Time = na
+varip float lastRBSAlertedLevel = na
+
+//=========================
+// ACTIVE SBR TOUCH STORAGE
+// varip digunakan untuk lock alert semasa realtime recalculation
+//=========================
+var float activeSBRLevel = na
+var int activeSBRBar = na
+var int activeSBRStartTime = na
+varip bool activeSBRTouched = false
+varip int lastSBRTouchM1Time = na
+varip float lastSBRAlertedLevel = na
+
+//=========================
 // DRAW RBS
 //=========================
 if showRBS and newRBS
     line.new(lastResistanceBar, lastResistance, bar_index + lineExtendBars, lastResistance, color=color.lime, width=2, style=line.style_solid)
+
     if showLabels
-        label.new(bar_index, lastResistance, "RBS", style=label.style_label_up, color=color.lime, textcolor=color.black)
+        label.new(bar_index, lastResistance, "RB", style=label.style_label_up, color=color.lime, textcolor=color.black)
+
+    activeRBSLevel := lastResistance
+    activeRBSBar := bar_index
+    activeRBSStartTime := time_close
+    activeRBSTouched := false
+    lastRBSTouchM1Time := na
+    lastRBSAlertedLevel := na
+
+    if enableAlerts and enableReadyAlerts
+        alert("READY BUY | RBS Formed | " + syminfo.ticker + " | TF: " + timeframe.period + " | Level: " + str.tostring(lastResistance, format.mintick) + " | Price: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+
     lastDrawnRBS := lastResistance
 
 //=========================
@@ -65,9 +131,158 @@ if showRBS and newRBS
 //=========================
 if showSBR and newSBR
     line.new(lastSupportBar, lastSupport, bar_index + lineExtendBars, lastSupport, color=color.red, width=2, style=line.style_solid)
+
     if showLabels
-        label.new(bar_index, lastSupport, "SBR", style=label.style_label_down, color=color.red, textcolor=color.white)
+        label.new(bar_index, lastSupport, "RS", style=label.style_label_down, color=color.red, textcolor=color.white)
+
+    activeSBRLevel := lastSupport
+    activeSBRBar := bar_index
+    activeSBRStartTime := time_close
+    activeSBRTouched := false
+    lastSBRTouchM1Time := na
+    lastSBRAlertedLevel := na
+
+    if enableAlerts and enableReadyAlerts
+        alert("READY SELL | SBR Formed | " + syminfo.ticker + " | TF: " + timeframe.period + " | Level: " + str.tostring(lastSupport, format.mintick) + " | Price: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+
     lastDrawnSBR := lastSupport
+
+//=======================================================
+// M1 TOUCH DETECTION
+// Important:
+// Alert BUY/SELL hanya trigger bila M1 candle sudah close.
+// Script scan M1 candle dalam current chart candle.
+//=======================================================
+m1TimeArr  = request.security_lower_tf(syminfo.tickerid, touchTF, time)
+m1HighArr  = request.security_lower_tf(syminfo.tickerid, touchTF, high)
+m1LowArr   = request.security_lower_tf(syminfo.tickerid, touchTF, low)
+m1CloseArr = request.security_lower_tf(syminfo.tickerid, touchTF, close)
+
+bool rbsTouchBuySignal = false
+bool sbrTouchSellSignal = false
+
+float rbsM1TouchPrice = na
+float sbrM1TouchPrice = na
+
+int rbsM1TouchTime = na
+int sbrM1TouchTime = na
+
+m1Size = array.size(m1CloseArr)
+
+hasActiveRBS = not na(activeRBSLevel) and not na(activeRBSStartTime)
+hasActiveSBR = not na(activeSBRLevel) and not na(activeSBRStartTime)
+
+if m1Size > 0
+    for i = 0 to m1Size - 1
+        int m1Time = array.get(m1TimeArr, i)
+        float m1High = array.get(m1HighArr, i)
+        float m1Low = array.get(m1LowArr, i)
+        float m1Close = array.get(m1CloseArr, i)
+
+        bool m1AfterRBS = hasActiveRBS and m1Time > activeRBSStartTime
+        bool m1AfterSBR = hasActiveSBR and m1Time > activeSBRStartTime
+
+        bool m1TouchRBS =
+             enableRBSTouchAlert and
+             m1AfterRBS and
+             m1Low <= activeRBSLevel + rbsTouchToleranceValue and
+             m1High >= activeRBSLevel - rbsTouchToleranceValue and
+             (na(lastRBSTouchM1Time) or m1Time > lastRBSTouchM1Time) and
+             (not alertOnlyOncePerRBS or not activeRBSTouched) and
+             (na(lastRBSAlertedLevel) or lastRBSAlertedLevel != activeRBSLevel)
+
+        bool m1TouchSBR =
+             enableSBRTouchAlert and
+             m1AfterSBR and
+             m1High >= activeSBRLevel - sbrTouchToleranceValue and
+             m1Low <= activeSBRLevel + sbrTouchToleranceValue and
+             (na(lastSBRTouchM1Time) or m1Time > lastSBRTouchM1Time) and
+             (not alertOnlyOncePerSBR or not activeSBRTouched) and
+             (na(lastSBRAlertedLevel) or lastSBRAlertedLevel != activeSBRLevel)
+
+        if m1TouchRBS and not rbsTouchBuySignal
+            rbsTouchBuySignal := true
+            rbsM1TouchPrice := m1Close
+            rbsM1TouchTime := m1Time
+
+        if m1TouchSBR and not sbrTouchSellSignal
+            sbrTouchSellSignal := true
+            sbrM1TouchPrice := m1Close
+            sbrM1TouchTime := m1Time
+
+//=========================
+// RBS TOUCH BUY ALERT BY M1 CLOSE
+// Anti-spam:
+// activeRBSTouched + lastRBSAlertedLevel lock alert untuk line yang sama
+//=========================
+if rbsTouchBuySignal
+    activeRBSTouched := true
+    lastRBSTouchM1Time := rbsM1TouchTime
+    lastRBSAlertedLevel := activeRBSLevel
+
+    if showLabels and showRBSTouchLabel
+        label.new(
+             bar_index,
+             low,
+             "BUY\nLine: " + str.tostring(activeRBSLevel, format.mintick),
+             style=label.style_label_up,
+             color=color.rgb(0, 230, 119, 10),
+             textcolor=color.black)
+
+    if enableAlerts
+        alert(
+             "ALERT BUY" +
+             " | " + syminfo.ticker +
+             " | Chart TF: " + timeframe.period +
+             " | Touch TF: " + touchTF +
+             " | RBS Line: " + str.tostring(activeRBSLevel, format.mintick) +
+             " | M1 Close Price: " + str.tostring(rbsM1TouchPrice, format.mintick),
+             alert.freq_once_per_bar)
+
+//=========================
+// SBR TOUCH SELL ALERT BY M1 CLOSE
+// Anti-spam:
+// activeSBRTouched + lastSBRAlertedLevel lock alert untuk line yang sama
+//=========================
+if sbrTouchSellSignal
+    activeSBRTouched := true
+    lastSBRTouchM1Time := sbrM1TouchTime
+    lastSBRAlertedLevel := activeSBRLevel
+
+    if showLabels and showSBRTouchLabel
+        label.new(
+             bar_index,
+             high,
+             "SELL\nLine: " + str.tostring(activeSBRLevel, format.mintick),
+             style=label.style_label_down,
+             color=color.rgb(255, 82, 82, 10),
+             textcolor=color.white)
+
+    if enableAlerts
+        alert(
+             "ALERT SELL" +
+             " | " + syminfo.ticker +
+             " | Chart TF: " + timeframe.period +
+             " | Touch TF: " + touchTF +
+             " | SBR Line: " + str.tostring(activeSBRLevel, format.mintick) +
+             " | M1 Close Price: " + str.tostring(sbrM1TouchPrice, format.mintick),
+             alert.freq_once_per_bar)
+
+//=========================
+// M1 DEBUG LABEL
+//=========================
+if showM1DebugLabel and barstate.islast
+    label.new(
+         bar_index,
+         high,
+         "M1 Scan\nM1 candles: " + str.tostring(m1Size) +
+         "\nActive RBS: " + str.tostring(hasActiveRBS) +
+         "\nActive SBR: " + str.tostring(hasActiveSBR) +
+         "\nRBS Touched: " + str.tostring(activeRBSTouched) +
+         "\nSBR Touched: " + str.tostring(activeSBRTouched),
+         style=label.style_label_down,
+         color=color.rgb(33, 150, 243, 20),
+         textcolor=color.white)
 
 //=========================
 // HTF FIBONACCI - OLD STYLE
@@ -197,7 +412,15 @@ plotshape(not na(pl), title="Pivot Low", style=shape.triangleup, location=locati
 // ALERT() FOR ANY ALERT FUNCTION CALL
 //=========================
 if enableAlerts and newRBS
-    alert("RBS Prepare Buy | " + syminfo.ticker + " | TF: " + timeframe.period + " | Level: " + str.tostring(lastResistance) + " | Price: " + str.tostring(close), alert.freq_once_per_bar_close)
+    alert("RBS Prepare Buy | " + syminfo.ticker + " | TF: " + timeframe.period + " | Level: " + str.tostring(lastResistance, format.mintick) + " | Price: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
 
 if enableAlerts and newSBR
-    alert("SBR Prepare Sell | " + syminfo.ticker + " | TF: " + timeframe.period + " | Level: " + str.tostring(lastSupport) + " | Price: " + str.tostring(close), alert.freq_once_per_bar_close)
+    alert("SBR Prepare Sell | " + syminfo.ticker + " | TF: " + timeframe.period + " | Level: " + str.tostring(lastSupport, format.mintick) + " | Price: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+
+//=========================
+// ALERTCONDITION BACKUP
+//=========================
+alertcondition(readyBuySignal, title="READY BUY - RBS", message="READY BUY | RBS Formed")
+alertcondition(readySellSignal, title="READY SELL - SBR", message="READY SELL | SBR Formed")
+alertcondition(rbsTouchBuySignal, title="ALERT BUY - M1 RBS Line Touched", message="ALERT BUY | M1 Candle Closed Touch RBS Line")
+alertcondition(sbrTouchSellSignal, title="ALERT SELL - M1 SBR Line Touched", message="ALERT SELL | M1 Candle Closed Touch SBR Line")

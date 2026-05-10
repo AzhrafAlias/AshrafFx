@@ -1,0 +1,923 @@
+//@version=5
+indicator("SBR RBS H1 Ready + Prepare Trigger + M5 Engulfing Confirm", overlay=true, max_lines_count=500, max_labels_count=500)
+
+//=========================
+// INPUT
+//=========================
+pivotLen       = input.int(3, "Pivot Length", minval=1)
+showRBS        = input.bool(true, "Show RBS Ready Buy")
+showSBR        = input.bool(true, "Show SBR Ready Sell")
+lineExtendBars = input.int(30, "Line Extend Bars", minval=1)
+showLabels     = input.bool(true, "Show Labels")
+useCloseBreak  = input.bool(true, "Use Body Close For Breakout")
+enableAlerts   = input.bool(true, "Enable Alerts")
+
+minBreakPips = input.float(30, "Min Break Candle (pips)")
+
+//=========================
+// MOMENTUM BREAK FILTER
+// READY candle filter
+//=========================
+useMomentumBreak      = input.bool(true, "Use Momentum Break Candle Filter")
+momentumAtrLen        = input.int(14, "Momentum ATR Length", minval=1)
+minMomentumAtrMult    = input.float(1.20, "Min Candle Range x ATR", step=0.05)
+minMomentumBodyPct    = input.float(0.60, "Min Body % Of Candle", step=0.05)
+requireStrongClose    = input.bool(true, "Require Strong Close Near High/Low")
+strongClosePct        = input.float(0.25, "Strong Close Zone %", step=0.05)
+
+//=========================
+// BALANCED BODY BREAK FILTER
+// Line mesti lebih kurang tengah body candle READY
+//=========================
+useBalancedBreakFilter = input.bool(true, "Use Balanced Body Break Filter")
+centerTolerance        = input.float(0.10, "Center Tolerance", step=0.01, minval=0.01, maxval=0.49)
+
+//=========================
+// M5 ENGULFING CONFIRMATION
+//=========================
+confirmTF              = input.timeframe("5", "Confirmation Timeframe")
+touchZonePips          = input.float(10, "M5 Touch Line Tolerance (pips)")
+readyExpireBars        = input.int(60, "Ready Expire After Chart Bars", minval=1)
+
+engulfMode = input.string(
+     "Body Or Close Beyond",
+     "M5 Engulfing Mode",
+     options=[
+         "Strict Body Engulf",
+         "Close Beyond Previous High/Low",
+         "Body Or Close Beyond",
+         "Strong Reversal Candle"
+     ])
+
+requirePrevOpposite       = input.bool(false, "Require Previous M5 Opposite Color")
+allowCloseBeyondBodyOnly  = input.bool(true, "Close Beyond Previous Body Is Enough")
+minEngulfBodyPct          = input.float(0.40, "Min Engulf Candle Body %", step=0.05)
+
+showReadySignal       = input.bool(true, "Show READY BUY/SELL")
+showRBCandleLabel     = input.bool(true, "Mark RB / RS Candle")
+showWaitingLine       = input.bool(true, "Show Waiting Line")
+showPrepareSignal     = input.bool(true, "Show PREPARE BUY/SELL")
+showTouchLabel        = input.bool(true, "Show M5 Touch / Engulf Label")
+showFailedReady       = input.bool(false, "Show Ready Expired")
+showDebug             = input.bool(false, "Show Debug Label")
+
+//=========================
+// EMA TREND FILTER
+//=========================
+useTrendFilter = input.bool(true, "Use EMA Trend Filter")
+trendTF        = input.timeframe("5", "Trend EMA Timeframe")
+emaLen         = input.int(50, "EMA Length", minval=1)
+showEMA        = input.bool(true, "Show EMA")
+showTrendBlocked = input.bool(true, "Show Trend Blocked Label")
+
+trendClose = request.security(syminfo.tickerid, trendTF, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+trendEMA   = request.security(syminfo.tickerid, trendTF, ta.ema(close, emaLen), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+trendBuyOK  = not useTrendFilter or trendClose > trendEMA
+trendSellOK = not useTrendFilter or trendClose < trendEMA
+
+plot(showEMA ? trendEMA : na, title="EMA Trend Filter", color=color.yellow, linewidth=2)
+
+//=========================
+// H1 SNR VALIDATION
+//=========================
+useH1Validation   = input.bool(true, "Validate With H1 SNR")
+h1TF              = input.timeframe("60", "SNR Validation Timeframe")
+h1PivotLen        = input.int(4, "H1 SNR Pivot Length", minval=1)
+h1ZonePips        = input.float(20, "H1 SNR Zone Tolerance (pips)")
+h1BreakBufferPips = input.float(0, "H1 Break Buffer (pips)")
+maxH1Levels       = input.int(30, "Max H1 SNR Levels Stored", minval=5)
+showBlocked       = input.bool(true, "Show Blocked SBR/RBS")
+
+//=========================
+// TP SETTING
+//=========================
+tpPoints  = input.float(5.0, "TP Points From SBR/RBS Line", step=0.1)
+showTPLine = input.bool(true, "Show TP Line")
+
+buySellLabelSize  = input.string("normal", "BUY/SELL Label Size", options=["tiny", "small", "normal", "large"])
+
+signalSize =
+     buySellLabelSize == "tiny" ? size.tiny :
+     buySellLabelSize == "small" ? size.small :
+     buySellLabelSize == "large" ? size.large :
+     size.normal
+
+//=========================
+// PIP VALUE
+//=========================
+pipValue = syminfo.mintick * 10
+
+minBreakValue      = minBreakPips * pipValue
+h1ZoneValue        = h1ZonePips * pipValue
+h1BreakBufferValue = h1BreakBufferPips * pipValue
+touchZoneValue     = touchZonePips * pipValue
+
+//=========================
+// FUNCTIONS
+//=========================
+f_addLevel(float[] arr, float level, float tolerance, int maxLevels) =>
+    bool exists = false
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            if math.abs(array.get(arr, i) - level) <= tolerance
+                exists := true
+    if not exists
+        array.unshift(arr, level)
+        if array.size(arr) > maxLevels
+            array.pop(arr)
+
+f_nearestLevel(float[] arr, float level, float tolerance) =>
+    float nearest = na
+    float minDist = 999999999.0
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            float lvl = array.get(arr, i)
+            float dist = math.abs(lvl - level)
+            if dist <= tolerance and dist < minDist
+                minDist := dist
+                nearest := lvl
+    nearest
+
+f_bullEngulf(float o, float h, float l, float c, float po, float ph, float pl, float pc) =>
+    float prevBodyHigh = math.max(po, pc)
+    float prevBodyLow  = math.min(po, pc)
+    float currBodyHigh = math.max(o, c)
+    float currBodyLow  = math.min(o, c)
+    float crange = h - l
+    float cbody  = math.abs(c - o)
+    float cbodyPct = crange > 0 ? cbody / crange : 0.0
+
+    bool prevBear = pc < po
+    bool currBull = c > o
+
+    bool strictBody =
+         currBull and
+         currBodyLow <= prevBodyLow and
+         currBodyHigh >= prevBodyHigh
+
+    bool closeBeyond =
+         currBull and
+         (
+             c > ph or
+             (allowCloseBeyondBodyOnly and c > prevBodyHigh)
+         )
+
+    bool strongReversal =
+         currBull and
+         cbodyPct >= minEngulfBodyPct and
+         c > prevBodyHigh
+
+    bool prevOK = not requirePrevOpposite or prevBear
+
+    prevOK and
+     (
+         engulfMode == "Strict Body Engulf" ? strictBody :
+         engulfMode == "Close Beyond Previous High/Low" ? closeBeyond :
+         engulfMode == "Strong Reversal Candle" ? strongReversal :
+         strictBody or closeBeyond or strongReversal
+     )
+
+f_bearEngulf(float o, float h, float l, float c, float po, float ph, float pl, float pc) =>
+    float prevBodyHigh = math.max(po, pc)
+    float prevBodyLow  = math.min(po, pc)
+    float currBodyHigh = math.max(o, c)
+    float currBodyLow  = math.min(o, c)
+    float crange = h - l
+    float cbody  = math.abs(c - o)
+    float cbodyPct = crange > 0 ? cbody / crange : 0.0
+
+    bool prevBull = pc > po
+    bool currBear = c < o
+
+    bool strictBody =
+         currBear and
+         currBodyHigh >= prevBodyHigh and
+         currBodyLow <= prevBodyLow
+
+    bool closeBeyond =
+         currBear and
+         (
+             c < pl or
+             (allowCloseBeyondBodyOnly and c < prevBodyLow)
+         )
+
+    bool strongReversal =
+         currBear and
+         cbodyPct >= minEngulfBodyPct and
+         c < prevBodyLow
+
+    bool prevOK = not requirePrevOpposite or prevBull
+
+    prevOK and
+     (
+         engulfMode == "Strict Body Engulf" ? strictBody :
+         engulfMode == "Close Beyond Previous High/Low" ? closeBeyond :
+         engulfMode == "Strong Reversal Candle" ? strongReversal :
+         strictBody or closeBeyond or strongReversal
+     )
+
+//=========================
+// CURRENT CHART TF PIVOT - BODY BASED SNR
+//=========================
+bodyHigh = math.max(open, close)
+bodyLow  = math.min(open, close)
+
+ph = ta.pivothigh(bodyHigh, pivotLen, pivotLen)
+pl = ta.pivotlow(bodyLow, pivotLen, pivotLen)
+
+var float lastResistance = na
+var int   lastResistanceBar = na
+var float lastSupport = na
+var int   lastSupportBar = na
+
+if not na(ph)
+    lastResistance := ph
+    lastResistanceBar := bar_index - pivotLen
+
+if not na(pl)
+    lastSupport := pl
+    lastSupportBar := bar_index - pivotLen
+
+//=========================
+// H1 SNR DETECTION
+//=========================
+h1PH = request.security(
+     syminfo.tickerid,
+     h1TF,
+     ta.pivothigh(math.max(open, close), h1PivotLen, h1PivotLen),
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off)
+
+h1PL = request.security(
+     syminfo.tickerid,
+     h1TF,
+     ta.pivotlow(math.min(open, close), h1PivotLen, h1PivotLen),
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off)
+
+var float[] h1ResistanceLevels = array.new_float()
+var float[] h1SupportLevels    = array.new_float()
+
+if not na(h1PH)
+    f_addLevel(h1ResistanceLevels, h1PH, h1ZoneValue, maxH1Levels)
+
+if not na(h1PL)
+    f_addLevel(h1SupportLevels, h1PL, h1ZoneValue, maxH1Levels)
+
+//=========================
+// BREAKOUT CONDITIONS
+//=========================
+bodyBreakAboveResistance = not na(lastResistance) and open <= lastResistance and close > lastResistance
+bodyBreakBelowSupport    = not na(lastSupport) and open >= lastSupport and close < lastSupport
+
+breakAboveResistance = useCloseBreak ? bodyBreakAboveResistance : not na(lastResistance) and high > lastResistance
+breakBelowSupport    = useCloseBreak ? bodyBreakBelowSupport : not na(lastSupport) and low < lastSupport
+
+breakCandleUp   = not na(lastResistance) and (close - lastResistance) >= minBreakValue
+breakCandleDown = not na(lastSupport) and (lastSupport - close) >= minBreakValue
+
+//=========================
+// MOMENTUM CANDLE
+//=========================
+momentumAtr = ta.atr(momentumAtrLen)
+candleRange = high - low
+candleBody  = math.abs(close - open)
+bodyPctNow = candleRange > 0 ? candleBody / candleRange : 0.0
+
+bullStrongClose = close >= high - candleRange * strongClosePct
+bearStrongClose = close <= low + candleRange * strongClosePct
+
+bullMomentumCandle =
+     close > open and
+     candleRange >= momentumAtr * minMomentumAtrMult and
+     bodyPctNow >= minMomentumBodyPct and
+     (not requireStrongClose or bullStrongClose)
+
+bearMomentumCandle =
+     close < open and
+     candleRange >= momentumAtr * minMomentumAtrMult and
+     bodyPctNow >= minMomentumBodyPct and
+     (not requireStrongClose or bearStrongClose)
+
+//=========================
+// BALANCED BODY BREAK
+//=========================
+bullBodySize = close - open
+
+bullLinePos =
+     bullBodySize > 0 and
+     not na(lastResistance) and
+     lastResistance >= open and
+     lastResistance <= close ?
+     (lastResistance - open) / bullBodySize : na
+
+bullBalancedBreak =
+     close > open and
+     not na(bullLinePos) and
+     bullLinePos >= (0.5 - centerTolerance) and
+     bullLinePos <= (0.5 + centerTolerance)
+
+bearBodySize = open - close
+
+bearLinePos =
+     bearBodySize > 0 and
+     not na(lastSupport) and
+     lastSupport <= open and
+     lastSupport >= close ?
+     (open - lastSupport) / bearBodySize : na
+
+bearBalancedBreak =
+     close < open and
+     not na(bearLinePos) and
+     bearLinePos >= (0.5 - centerTolerance) and
+     bearLinePos <= (0.5 + centerTolerance)
+
+//=========================
+// VALID READY BREAK
+//=========================
+validBreakUp =
+     breakAboveResistance and
+     breakCandleUp and
+     (not useMomentumBreak or bullMomentumCandle) and
+     (not useBalancedBreakFilter or bullBalancedBreak)
+
+validBreakDown =
+     breakBelowSupport and
+     breakCandleDown and
+     (not useMomentumBreak or bearMomentumCandle) and
+     (not useBalancedBreakFilter or bearBalancedBreak)
+
+//=========================
+// AVOID DUPLICATE
+//=========================
+var float lastProcessedRBS = na
+var float lastProcessedSBR = na
+
+rawNewRBS = validBreakUp and (na(lastProcessedRBS) or lastProcessedRBS != lastResistance)
+rawNewSBR = validBreakDown and (na(lastProcessedSBR) or lastProcessedSBR != lastSupport)
+
+//=========================
+// H1 VALIDATION
+//=========================
+nearestH1Resistance = f_nearestLevel(h1ResistanceLevels, lastResistance, h1ZoneValue)
+nearestH1Support    = f_nearestLevel(h1SupportLevels, lastSupport, h1ZoneValue)
+
+hasNearbyH1Resistance = rawNewRBS and not na(nearestH1Resistance)
+hasNearbyH1Support    = rawNewSBR and not na(nearestH1Support)
+
+h1ResistanceBrokenForRBS = hasNearbyH1Resistance and close > nearestH1Resistance + h1BreakBufferValue
+h1SupportBrokenForSBR    = hasNearbyH1Support and close < nearestH1Support - h1BreakBufferValue
+
+h1ResistanceBlockingRBS = useH1Validation and hasNearbyH1Resistance and not h1ResistanceBrokenForRBS
+h1SupportBlockingSBR    = useH1Validation and hasNearbyH1Support and not h1SupportBrokenForSBR
+
+trendBlockingRBS = rawNewRBS and not trendBuyOK
+trendBlockingSBR = rawNewSBR and not trendSellOK
+
+rbsAllowed = rawNewRBS and not h1ResistanceBlockingRBS and trendBuyOK
+sbrAllowed = rawNewSBR and not h1SupportBlockingSBR and trendSellOK
+
+//=========================
+// READY STORAGE
+//=========================
+var float readyRBSLevel = na
+var int   readyRBSLevelBar = na
+var int   readyRBSStartBar = na
+var int   readyRBSStartTime = na
+var bool  readyRBSActive = false
+var bool  readyRBSPrepared = false
+
+var float readySBRLevel = na
+var int   readySBRLevelBar = na
+var int   readySBRStartBar = na
+var int   readySBRStartTime = na
+var bool  readySBRActive = false
+var bool  readySBRPrepared = false
+
+buySignal = false
+sellSignal = false
+readyBuySignal = false
+readySellSignal = false
+prepareBuySignal = false
+prepareSellSignal = false
+
+//=========================
+// CREATE READY BUY
+//=========================
+if showRBS and rbsAllowed
+    readyBuySignal := true
+
+    readyRBSLevel := lastResistance
+    readyRBSLevelBar := lastResistanceBar
+    readyRBSStartBar := bar_index
+    readyRBSStartTime := time_close
+    readyRBSActive := true
+    readyRBSPrepared := false
+
+    readySBRActive := false
+    readySBRLevel := na
+    readySBRLevelBar := na
+    readySBRStartBar := na
+    readySBRStartTime := na
+    readySBRPrepared := false
+
+    if showWaitingLine
+        line.new(lastResistanceBar, lastResistance, bar_index + lineExtendBars, lastResistance, color=color.rgb(0, 230, 119), width=2, style=line.style_dotted)
+
+    if showRBCandleLabel
+        label.new(bar_index, high, "RB CANDLE", style=label.style_label_down, color=color.rgb(0, 230, 119, 10), textcolor=color.black, size=signalSize)
+
+    if showLabels and showReadySignal
+        label.new(
+             bar_index,
+             lastResistance,
+             "READY BUY\nRB CANDLE\nWait First M5 Touch Line\nLine: " + str.tostring(lastResistance, format.mintick),
+             style=label.style_label_up,
+             color=color.rgb(0, 230, 119, 65),
+             textcolor=color.black,
+             size=signalSize)
+
+    if enableAlerts
+        alert(
+             "READY BUY | RB CANDLE | " + syminfo.ticker +
+             " | TF: " + timeframe.period +
+             " | Line Price: " + str.tostring(lastResistance, format.mintick) +
+             " | Waiting First M5 Touch Line",
+             alert.freq_once_per_bar_close)
+
+    lastProcessedRBS := lastResistance
+
+//=========================
+// CREATE READY SELL
+//=========================
+if showSBR and sbrAllowed
+    readySellSignal := true
+
+    readySBRLevel := lastSupport
+    readySBRLevelBar := lastSupportBar
+    readySBRStartBar := bar_index
+    readySBRStartTime := time_close
+    readySBRActive := true
+    readySBRPrepared := false
+
+    readyRBSActive := false
+    readyRBSLevel := na
+    readyRBSLevelBar := na
+    readyRBSStartBar := na
+    readyRBSStartTime := na
+    readyRBSPrepared := false
+
+    if showWaitingLine
+        line.new(lastSupportBar, lastSupport, bar_index + lineExtendBars, lastSupport, color=color.rgb(255, 82, 82), width=2, style=line.style_dotted)
+
+    if showRBCandleLabel
+        label.new(bar_index, low, "RS CANDLE", style=label.style_label_up, color=color.rgb(255, 82, 82, 10), textcolor=color.white, size=signalSize)
+
+    if showLabels and showReadySignal
+        label.new(
+             bar_index,
+             lastSupport,
+             "READY SELL\nRS CANDLE\nWait First M5 Touch Line\nLine: " + str.tostring(lastSupport, format.mintick),
+             style=label.style_label_down,
+             color=color.rgb(255, 82, 82, 65),
+             textcolor=color.white,
+             size=signalSize)
+
+    if enableAlerts
+        alert(
+             "READY SELL | RS CANDLE | " + syminfo.ticker +
+             " | TF: " + timeframe.period +
+             " | Line Price: " + str.tostring(lastSupport, format.mintick) +
+             " | Waiting First M5 Touch Line",
+             alert.freq_once_per_bar_close)
+
+    lastProcessedSBR := lastSupport
+
+//=========================
+// M5 DATA ARRAYS INSIDE CURRENT CHART BAR
+// Scans M5 candles even when chart is H1.
+//=========================
+arrM5Time  = request.security_lower_tf(syminfo.tickerid, confirmTF, time)
+arrM5Open  = request.security_lower_tf(syminfo.tickerid, confirmTF, open)
+arrM5High  = request.security_lower_tf(syminfo.tickerid, confirmTF, high)
+arrM5Low   = request.security_lower_tf(syminfo.tickerid, confirmTF, low)
+arrM5Close = request.security_lower_tf(syminfo.tickerid, confirmTF, close)
+
+bool m5BuyConfirm = false
+bool m5SellConfirm = false
+bool m5PrepareBuyNow = false
+bool m5PrepareSellNow = false
+
+int  m5BuyTime = na
+int  m5SellTime = na
+int  m5PrepareBuyTime = na
+int  m5PrepareSellTime = na
+
+int m5Size = array.size(arrM5Close)
+
+if m5Size >= 2
+    for i = 1 to m5Size - 1
+        int t = array.get(arrM5Time, i)
+
+        float o  = array.get(arrM5Open, i)
+        float h  = array.get(arrM5High, i)
+        float l  = array.get(arrM5Low, i)
+        float c  = array.get(arrM5Close, i)
+
+        float po = array.get(arrM5Open, i - 1)
+        float phh = array.get(arrM5High, i - 1)
+        float plw = array.get(arrM5Low, i - 1)
+        float pc = array.get(arrM5Close, i - 1)
+
+        bool afterRBSReady = readyRBSActive and not na(readyRBSStartTime) and t > readyRBSStartTime
+        bool afterSBRReady = readySBRActive and not na(readySBRStartTime) and t > readySBRStartTime
+
+        bool touchRBSLine =
+             afterRBSReady and
+             l <= readyRBSLevel + touchZoneValue and
+             h >= readyRBSLevel - touchZoneValue
+
+        bool touchSBRLine =
+             afterSBRReady and
+             h >= readySBRLevel - touchZoneValue and
+             l <= readySBRLevel + touchZoneValue
+
+        //=========================
+        // NEW TRIGGER:
+        // First M5 candle touch line after READY = PREPARE BUY / PREPARE SELL
+        //=========================
+        if touchRBSLine and not readyRBSPrepared and not m5PrepareBuyNow
+            m5PrepareBuyNow := true
+            m5PrepareBuyTime := t
+
+        if touchSBRLine and not readySBRPrepared and not m5PrepareSellNow
+            m5PrepareSellNow := true
+            m5PrepareSellTime := t
+
+        bool bullEngulf = f_bullEngulf(o, h, l, c, po, phh, plw, pc)
+        bool bearEngulf = f_bearEngulf(o, h, l, c, po, phh, plw, pc)
+
+        if touchRBSLine and bullEngulf and trendBuyOK
+            m5BuyConfirm := true
+            m5BuyTime := t
+
+        if touchSBRLine and bearEngulf and trendSellOK
+            m5SellConfirm := true
+            m5SellTime := t
+
+//=========================
+// READY EXPIRE
+//=========================
+hasReadyRBS = readyRBSActive and not na(readyRBSLevel)
+hasReadySBR = readySBRActive and not na(readySBRLevel)
+
+readyRBSExpired = hasReadyRBS and bar_index - readyRBSStartBar > readyExpireBars
+readySBRExpired = hasReadySBR and bar_index - readySBRStartBar > readyExpireBars
+
+//=========================
+// PREPARE BUY / PREPARE SELL TRIGGER
+//=========================
+if m5PrepareBuyNow and hasReadyRBS
+    prepareBuySignal := true
+    readyRBSPrepared := true
+
+    if showLabels and showPrepareSignal
+        label.new(
+             bar_index,
+             readyRBSLevel,
+             "PREPARE BUY\nFirst M5 Touch RBS Line\nLine: " + str.tostring(readyRBSLevel, format.mintick),
+             style=label.style_label_left,
+             color=color.rgb(0, 230, 119, 20),
+             textcolor=color.black,
+             size=signalSize)
+
+    if enableAlerts
+        alert(
+             "PREPARE BUY | FIRST M5 TOUCH RBS LINE" +
+             " | " + syminfo.ticker +
+             " | Chart TF: " + timeframe.period +
+             " | Confirm TF: " + confirmTF +
+             " | Line Price: " + str.tostring(readyRBSLevel, format.mintick) +
+             " | Waiting M5 Bullish Engulfing",
+             alert.freq_once_per_bar_close)
+
+if m5PrepareSellNow and hasReadySBR
+    prepareSellSignal := true
+    readySBRPrepared := true
+
+    if showLabels and showPrepareSignal
+        label.new(
+             bar_index,
+             readySBRLevel,
+             "PREPARE SELL\nFirst M5 Touch SBR Line\nLine: " + str.tostring(readySBRLevel, format.mintick),
+             style=label.style_label_left,
+             color=color.rgb(255, 82, 82, 20),
+             textcolor=color.white,
+             size=signalSize)
+
+    if enableAlerts
+        alert(
+             "PREPARE SELL | FIRST M5 TOUCH SBR LINE" +
+             " | " + syminfo.ticker +
+             " | Chart TF: " + timeframe.period +
+             " | Confirm TF: " + confirmTF +
+             " | Line Price: " + str.tostring(readySBRLevel, format.mintick) +
+             " | Waiting M5 Bearish Engulfing",
+             alert.freq_once_per_bar_close)
+
+//=========================
+// DEBUG
+//=========================
+if showDebug and hasReadyRBS
+    label.new(
+         bar_index,
+         readyRBSLevel,
+         "H1 Ready BUY\nPrepare: " + str.tostring(readyRBSPrepared) +
+         "\nM5 Prepare Now: " + str.tostring(m5PrepareBuyNow) +
+         "\nM5 Buy Confirm: " + str.tostring(m5BuyConfirm) +
+         "\nM5 Size: " + str.tostring(m5Size) +
+         "\nTrend: " + str.tostring(trendBuyOK),
+         style=label.style_label_left,
+         color=color.rgb(0, 230, 119, 80),
+         textcolor=color.black,
+         size=size.tiny)
+
+if showDebug and hasReadySBR
+    label.new(
+         bar_index,
+         readySBRLevel,
+         "H1 Ready SELL\nPrepare: " + str.tostring(readySBRPrepared) +
+         "\nM5 Prepare Now: " + str.tostring(m5PrepareSellNow) +
+         "\nM5 Sell Confirm: " + str.tostring(m5SellConfirm) +
+         "\nM5 Size: " + str.tostring(m5Size) +
+         "\nTrend: " + str.tostring(trendSellOK),
+         style=label.style_label_left,
+         color=color.rgb(255, 82, 82, 80),
+         textcolor=color.white,
+         size=size.tiny)
+
+//=========================
+// FINAL BUY SIGNAL
+//=========================
+if m5BuyConfirm and hasReadyRBS
+    buySignal := true
+
+    buyLinePrice = readyRBSLevel
+    buyTPPrice   = buyLinePrice + tpPoints
+
+    line.new(readyRBSLevelBar, buyLinePrice, bar_index + lineExtendBars, buyLinePrice, color=color.rgb(0, 230, 119), width=2)
+
+    if showTPLine
+        line.new(bar_index, buyTPPrice, bar_index + lineExtendBars, buyTPPrice, color=color.blue, width=1, style=line.style_dashed)
+
+    if showLabels
+        label.new(
+             bar_index,
+             low,
+             "BUY\nM5 BULLISH ENGULFING CONFIRMED\nTouch RBS Line\nLine: " + str.tostring(buyLinePrice, format.mintick) +
+             "\nTP: " + str.tostring(buyTPPrice, format.mintick),
+             style=label.style_label_up,
+             color=color.rgb(0, 230, 119, 10),
+             textcolor=color.black,
+             size=signalSize)
+
+    if showTPLine and showLabels
+        label.new(
+             bar_index,
+             buyTPPrice,
+             "TP " + str.tostring(tpPoints) + " POINT\n" + str.tostring(buyTPPrice, format.mintick),
+             style=label.style_label_down,
+             color=color.blue,
+             textcolor=color.white)
+
+    if showTouchLabel and not na(m5BuyTime)
+        label.new(
+             bar_index,
+             buyLinePrice,
+             "M5 BUY CONFIRMED",
+             style=label.style_label_left,
+             color=color.rgb(0, 230, 119, 20),
+             textcolor=color.black,
+             size=size.tiny)
+
+    if enableAlerts
+        alert(
+             "BUY | M5 BULLISH ENGULFING CONFIRMED | TOUCH RBS LINE" +
+             " | " + syminfo.ticker +
+             " | Chart TF: " + timeframe.period +
+             " | Confirm TF: " + confirmTF +
+             " | Line Price: " + str.tostring(buyLinePrice, format.mintick) +
+             " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(buyTPPrice, format.mintick),
+             alert.freq_once_per_bar_close)
+
+    readyRBSActive := false
+    readyRBSLevel := na
+    readyRBSLevelBar := na
+    readyRBSStartBar := na
+    readyRBSStartTime := na
+    readyRBSPrepared := false
+
+//=========================
+// FINAL SELL SIGNAL
+//=========================
+if m5SellConfirm and hasReadySBR
+    sellSignal := true
+
+    sellLinePrice = readySBRLevel
+    sellTPPrice   = sellLinePrice - tpPoints
+
+    line.new(readySBRLevelBar, sellLinePrice, bar_index + lineExtendBars, sellLinePrice, color=color.rgb(255, 82, 82), width=2)
+
+    if showTPLine
+        line.new(bar_index, sellTPPrice, bar_index + lineExtendBars, sellTPPrice, color=color.blue, width=1, style=line.style_dashed)
+
+    if showLabels
+        label.new(
+             bar_index,
+             high,
+             "SELL\nM5 BEARISH ENGULFING CONFIRMED\nTouch SBR Line\nLine: " + str.tostring(sellLinePrice, format.mintick) +
+             "\nTP: " + str.tostring(sellTPPrice, format.mintick),
+             style=label.style_label_down,
+             color=color.rgb(255, 82, 82, 10),
+             textcolor=color.white,
+             size=signalSize)
+
+    if showTPLine and showLabels
+        label.new(
+             bar_index,
+             sellTPPrice,
+             "TP " + str.tostring(tpPoints) + " POINT\n" + str.tostring(sellTPPrice, format.mintick),
+             style=label.style_label_up,
+             color=color.blue,
+             textcolor=color.white)
+
+    if showTouchLabel and not na(m5SellTime)
+        label.new(
+             bar_index,
+             sellLinePrice,
+             "M5 SELL CONFIRMED",
+             style=label.style_label_left,
+             color=color.rgb(255, 82, 82, 20),
+             textcolor=color.white,
+             size=size.tiny)
+
+    if enableAlerts
+        alert(
+             "SELL | M5 BEARISH ENGULFING CONFIRMED | TOUCH SBR LINE" +
+             " | " + syminfo.ticker +
+             " | Chart TF: " + timeframe.period +
+             " | Confirm TF: " + confirmTF +
+             " | Line Price: " + str.tostring(sellLinePrice, format.mintick) +
+             " | TP " + str.tostring(tpPoints) + " Point: " + str.tostring(sellTPPrice, format.mintick),
+             alert.freq_once_per_bar_close)
+
+    readySBRActive := false
+    readySBRLevel := na
+    readySBRLevelBar := na
+    readySBRStartBar := na
+    readySBRStartTime := na
+    readySBRPrepared := false
+
+//=========================
+// EXPIRED READY
+//=========================
+if readyRBSExpired
+    if showFailedReady
+        label.new(
+             bar_index,
+             readyRBSLevel,
+             "READY BUY EXPIRED\nNo M5 Bullish Engulfing",
+             style=label.style_label_down,
+             color=color.rgb(120, 120, 120, 30),
+             textcolor=color.white)
+
+    readyRBSActive := false
+    readyRBSLevel := na
+    readyRBSLevelBar := na
+    readyRBSStartBar := na
+    readyRBSStartTime := na
+    readyRBSPrepared := false
+
+if readySBRExpired
+    if showFailedReady
+        label.new(
+             bar_index,
+             readySBRLevel,
+             "READY SELL EXPIRED\nNo M5 Bearish Engulfing",
+             style=label.style_label_up,
+             color=color.rgb(120, 120, 120, 30),
+             textcolor=color.white)
+
+    readySBRActive := false
+    readySBRLevel := na
+    readySBRLevelBar := na
+    readySBRStartBar := na
+    readySBRStartTime := na
+    readySBRPrepared := false
+
+//=========================
+// BLOCKED LABELS
+//=========================
+if showBlocked and h1ResistanceBlockingRBS
+    line.new(lastResistanceBar, lastResistance, bar_index + lineExtendBars, lastResistance, color=color.rgb(255, 193, 7), width=2, style=line.style_dashed)
+
+    if showLabels
+        label.new(
+             bar_index,
+             lastResistance,
+             "RBS BLOCKED\nH1 Resistance Still Holding\n" + str.tostring(nearestH1Resistance, format.mintick),
+             style=label.style_label_down,
+             color=color.rgb(255, 193, 7, 20),
+             textcolor=color.black)
+
+    lastProcessedRBS := lastResistance
+
+if showBlocked and h1SupportBlockingSBR
+    line.new(lastSupportBar, lastSupport, bar_index + lineExtendBars, lastSupport, color=color.rgb(255, 193, 7), width=2, style=line.style_dashed)
+
+    if showLabels
+        label.new(
+             bar_index,
+             lastSupport,
+             "SBR BLOCKED\nH1 Support Still Holding\n" + str.tostring(nearestH1Support, format.mintick),
+             style=label.style_label_up,
+             color=color.rgb(255, 193, 7, 20),
+             textcolor=color.black)
+
+    lastProcessedSBR := lastSupport
+
+if showTrendBlocked and trendBlockingRBS
+    line.new(lastResistanceBar, lastResistance, bar_index + lineExtendBars, lastResistance, color=color.rgb(156, 39, 176), width=2, style=line.style_dashed)
+
+    if showLabels
+        label.new(
+             bar_index,
+             lastResistance,
+             "RBS BLOCKED\nEMA Trend Not BUY",
+             style=label.style_label_down,
+             color=color.rgb(156, 39, 176, 20),
+             textcolor=color.white)
+
+    lastProcessedRBS := lastResistance
+
+if showTrendBlocked and trendBlockingSBR
+    line.new(lastSupportBar, lastSupport, bar_index + lineExtendBars, lastSupport, color=color.rgb(156, 39, 176), width=2, style=line.style_dashed)
+
+    if showLabels
+        label.new(
+             bar_index,
+             lastSupport,
+             "SBR BLOCKED\nEMA Trend Not SELL",
+             style=label.style_label_up,
+             color=color.rgb(156, 39, 176, 20),
+             textcolor=color.white)
+
+    lastProcessedSBR := lastSupport
+
+//=========================
+// ALERT BLOCKED
+//=========================
+if enableAlerts and h1ResistanceBlockingRBS
+    alert(
+         "RBS BLOCKED | H1 Resistance Still Holding | " +
+         syminfo.ticker +
+         " | TF: " + timeframe.period +
+         " | RBS Line Price: " + str.tostring(lastResistance, format.mintick) +
+         " | H1 Resistance: " + str.tostring(nearestH1Resistance, format.mintick),
+         alert.freq_once_per_bar_close)
+
+if enableAlerts and h1SupportBlockingSBR
+    alert(
+         "SBR BLOCKED | H1 Support Still Holding | " +
+         syminfo.ticker +
+         " | TF: " + timeframe.period +
+         " | SBR Line Price: " + str.tostring(lastSupport, format.mintick) +
+         " | H1 Support: " + str.tostring(nearestH1Support, format.mintick),
+         alert.freq_once_per_bar_close)
+
+if enableAlerts and trendBlockingRBS
+    alert(
+         "RBS BLOCKED | EMA Trend Not BUY | " +
+         syminfo.ticker +
+         " | TF: " + timeframe.period +
+         " | RBS Line Price: " + str.tostring(lastResistance, format.mintick),
+         alert.freq_once_per_bar_close)
+
+if enableAlerts and trendBlockingSBR
+    alert(
+         "SBR BLOCKED | EMA Trend Not SELL | " +
+         syminfo.ticker +
+         " | TF: " + timeframe.period +
+         " | SBR Line Price: " + str.tostring(lastSupport, format.mintick),
+         alert.freq_once_per_bar_close)
+
+//=========================
+// ALERTCONDITION BACKUP
+//=========================
+alertcondition(readyBuySignal, title="READY BUY Signal", message="READY BUY | RB CANDLE")
+alertcondition(readySellSignal, title="READY SELL Signal", message="READY SELL | RS CANDLE")
+alertcondition(prepareBuySignal, title="PREPARE BUY Signal", message="PREPARE BUY | FIRST M5 TOUCH RBS LINE")
+alertcondition(prepareSellSignal, title="PREPARE SELL Signal", message="PREPARE SELL | FIRST M5 TOUCH SBR LINE")
+alertcondition(buySignal, title="BUY Signal", message="BUY | M5 BULLISH ENGULFING CONFIRMED | TOUCH RBS LINE")
+alertcondition(sellSignal, title="SELL Signal", message="SELL | M5 BEARISH ENGULFING CONFIRMED | TOUCH SBR LINE")
