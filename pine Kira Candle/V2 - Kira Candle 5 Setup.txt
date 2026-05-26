@@ -1,0 +1,588 @@
+                    //@version=5
+                    indicator("Custom Candle Pattern + Last 5 Support Resistance + Bar Open Alert", overlay=true, max_lines_count=500, max_labels_count=500)
+
+                    //=========================
+                    // TIMEFRAME FILTER
+                    //=========================
+                    isM6Timeframe = timeframe.period == "6"
+
+                    //=========================
+                    // INPUT
+                    //=========================
+                    useSNRFilter       = input.bool(false, "Only Show Signal Near S/R")
+                    pivotLen           = input.int(3, "Pivot Length", minval=1)
+
+                    snrTolerancePips   = input.float(20, "Signal Distance From S/R (pips)")
+                    showSRLines        = input.bool(false, "Show Last 5 Support / Resistance Lines")
+                    lineExtendBars     = input.int(50, "Line Extend Bars", minval=1)
+
+                    enableAlerts       = input.bool(true, "Enable Alerts")
+
+                    resColor = input.color(color.red, "Resistance Line Color")
+                    supColor = input.color(color.lime, "Support Line Color")
+                    lineWidth = input.int(2, "S/R Line Width", minval=1, maxval=5)
+
+                    //=========================
+                    // 3RD SETTING BODY FILTER
+                    //=========================
+                    use3rdBodyFilter = input.bool(true, "Use 3rd Setting Big Body Filter")
+
+                    min3rdBodyPips =
+                         input.float(25, "Min EACH Candle Body For 3rd Setting (pips)", step=0.1)
+
+                    min3rdAvgBodyPips =
+                         input.float(25, "Min Average Body For 3rd Setting (pips)", step=0.1)
+
+                    //=========================
+                    // 3RD SETTING REJECTION FILTER
+                    //=========================
+                    use3rdRejectionFilter =
+                         input.bool(true, "Use 3rd Setting Rejection Wick Filter")
+
+                    wickBodyRatio =
+                         input.float(0.8, "Min Wick / Body Ratio For 3rd Setting", step=0.1)
+
+                    minRejectionWickPips =
+                         input.float(8, "Min Rejection Wick Size For 3rd Setting (pips)", step=0.1)
+
+                    //=========================
+                    // PIP VALUE
+                    //=========================
+                    pipValue          = syminfo.mintick * 10
+                    snrToleranceValue = snrTolerancePips * pipValue
+                    min3rdBodyValue   = min3rdBodyPips * pipValue
+                    min3rdAvgValue    = min3rdAvgBodyPips * pipValue
+                    minRejectionWickValue = minRejectionWickPips * pipValue
+
+                    //=========================
+                    // BODY HIGH LOW
+                    //=========================
+                    bodyHigh = math.max(open, close)
+                    bodyLow  = math.min(open, close)
+
+                    //=========================
+                    // BODY / WICK FUNCTIONS
+                    //=========================
+                    bodySize(i) =>
+                        math.abs(close[i] - open[i])
+
+                    upperWick(i) =>
+                        high[i] - math.max(open[i], close[i])
+
+                    lowerWick(i) =>
+                        math.min(open[i], close[i]) - low[i]
+
+                    //=========================
+                    // 3RD SETTING BODY FILTER LOGIC
+                    // Candle 2 = index 1
+                    // Candle 3 = index 0
+                    //=========================
+                    secondCandleBody =
+                         bodySize(1)
+
+                    thirdCandleBody =
+                         bodySize(0)
+
+                    avgSecondThirdBody =
+                         (secondCandleBody + thirdCandleBody) / 2
+
+                    thirdSettingBigBodyOK =
+                         not use3rdBodyFilter or
+                         (
+                             secondCandleBody >= min3rdBodyValue and
+                             thirdCandleBody >= min3rdBodyValue and
+                             avgSecondThirdBody >= min3rdAvgValue
+                         )
+
+                    //=========================
+                    // 3RD SETTING REJECTION FILTER LOGIC
+                    // BUY 3rd perlu lower wick pada candle ke-3
+                    // SELL 3rd perlu upper wick pada candle ke-3
+                    //=========================
+                    buy3rdRejectionOK =
+                         not use3rdRejectionFilter or
+                         (
+                             lowerWick(0) >= thirdCandleBody * wickBodyRatio and
+                             lowerWick(0) >= minRejectionWickValue
+                         )
+
+                    sell3rdRejectionOK =
+                         not use3rdRejectionFilter or
+                         (
+                             upperWick(0) >= thirdCandleBody * wickBodyRatio and
+                             upperWick(0) >= minRejectionWickValue
+                         )
+
+                    //=========================
+                    // PIVOT DETECTION
+                    // Resistance = pivot high
+                    // Support    = pivot low
+                    //=========================
+                    ph = ta.pivothigh(bodyHigh, pivotLen, pivotLen)
+                    pl = ta.pivotlow(bodyLow, pivotLen, pivotLen)
+
+                    //=========================
+                    // STORE LAST 5 RESISTANCE / SUPPORT
+                    //=========================
+                    var float[] lastRes = array.new_float()
+                    var int[]   lastResBar = array.new_int()
+
+                    var float[] lastSup = array.new_float()
+                    var int[]   lastSupBar = array.new_int()
+
+                    if not na(ph)
+                        array.unshift(lastRes, ph)
+                        array.unshift(lastResBar, bar_index - pivotLen)
+
+                        if array.size(lastRes) > 5
+                            array.pop(lastRes)
+                            array.pop(lastResBar)
+
+                    if not na(pl)
+                        array.unshift(lastSup, pl)
+                        array.unshift(lastSupBar, bar_index - pivotLen)
+
+                        if array.size(lastSup) > 5
+                            array.pop(lastSup)
+                            array.pop(lastSupBar)
+
+                    //=========================
+                    // FIXED LINE ARRAYS
+                    //=========================
+                    var line[] resLines = array.new_line(5, na)
+                    var line[] supLines = array.new_line(5, na)
+
+                    //=========================
+                    // DRAW / UPDATE LAST 5 S/R LINES
+                    //=========================
+                    for i = 0 to 4
+                        //=====================
+                        // RESISTANCE LINES
+                        //=====================
+                        resLine = array.get(resLines, i)
+
+                        if showSRLines and i < array.size(lastRes)
+                            resPrice = array.get(lastRes, i)
+                            resBar   = array.get(lastResBar, i)
+
+                            if na(resLine)
+                                resLine := line.new(
+                                     resBar,
+                                     resPrice,
+                                     bar_index + lineExtendBars,
+                                     resPrice,
+                                     color=resColor,
+                                     width=lineWidth)
+
+                                array.set(resLines, i, resLine)
+                            else
+                                line.set_xy1(resLine, resBar, resPrice)
+                                line.set_xy2(resLine, bar_index + lineExtendBars, resPrice)
+                                line.set_color(resLine, resColor)
+                                line.set_width(resLine, lineWidth)
+                        else
+                            if not na(resLine)
+                                line.delete(resLine)
+                                array.set(resLines, i, na)
+
+                        //=====================
+                        // SUPPORT LINES
+                        //=====================
+                        supLine = array.get(supLines, i)
+
+                        if showSRLines and i < array.size(lastSup)
+                            supPrice = array.get(lastSup, i)
+                            supBar   = array.get(lastSupBar, i)
+
+                            if na(supLine)
+                                supLine := line.new(
+                                     supBar,
+                                     supPrice,
+                                     bar_index + lineExtendBars,
+                                     supPrice,
+                                     color=supColor,
+                                     width=lineWidth)
+
+                                array.set(supLines, i, supLine)
+                            else
+                                line.set_xy1(supLine, supBar, supPrice)
+                                line.set_xy2(supLine, bar_index + lineExtendBars, supPrice)
+                                line.set_color(supLine, supColor)
+                                line.set_width(supLine, lineWidth)
+                        else
+                            if not na(supLine)
+                                line.delete(supLine)
+                                array.set(supLines, i, na)
+
+                    //=========================
+                    // PRICE NEAR LAST 5 SUPPORT / RESISTANCE
+                    // BUY near support
+                    // SELL near resistance
+                    //=========================
+                    nearSupport = false
+                    nearResistance = false
+
+                    if array.size(lastSup) > 0
+                        for i = 0 to array.size(lastSup) - 1
+                            supPriceCheck = array.get(lastSup, i)
+                            nearSupport := nearSupport or math.abs(close - supPriceCheck) <= snrToleranceValue
+
+                    if array.size(lastRes) > 0
+                        for i = 0 to array.size(lastRes) - 1
+                            resPriceCheck = array.get(lastRes, i)
+                            nearResistance := nearResistance or math.abs(close - resPriceCheck) <= snrToleranceValue
+
+                    buyZoneOK  = not useSNRFilter or nearSupport
+                    sellZoneOK = not useSNRFilter or nearResistance
+
+                    //==========================
+                    // CANDLE FUNCTIONS
+                    //==========================
+                    isBull(i) =>
+                        close[i] > open[i]
+
+                    isBear(i) =>
+                        close[i] < open[i]
+
+                    //==========================
+                    // BUY LOGIC
+                    //==========================
+
+                    // BUY 1st:
+                    // 1st bearish
+                    // 2nd bullish
+                    // 3rd bearish
+                    // 4th bearish
+                    // 5th bearish
+                    // 6th bullish
+                    // 7th bullish
+                    buy1stPattern =
+                         bar_index >= 6 and
+                         isBear(6) and
+                         isBull(5) and
+                         isBear(4) and
+                         isBear(3) and
+                         isBear(2) and
+                         isBull(1) and
+                         isBull(0)
+
+                    // BUY 2nd:
+                    // 1st bullish
+                    // 2nd bearish
+                    // 3rd bearish
+                    // 4th bearish
+                    // 5th bearish
+                    // 6th bullish
+                    buy2ndPattern =
+                         bar_index >= 5 and
+                         isBull(5) and
+                         isBear(4) and
+                         isBear(3) and
+                         isBear(2) and
+                         isBear(1) and
+                         isBull(0)
+
+                    // BUY 3rd:
+                    // 1st bullish
+                    // 2nd bearish dengan body besar
+                    // 3rd bearish dengan body besar + lower wick rejection
+                    // 2nd candle tidak engulf 3rd candle
+                    buy3rdPattern =
+                         bar_index >= 2 and
+                         isBull(2) and
+                         isBear(1) and
+                         isBear(0) and
+                         thirdSettingBigBodyOK and
+                         buy3rdRejectionOK and
+                         not (high[1] > high[0] and low[1] < low[0])
+
+                    // BUY 4th:
+                    // 1st bullish
+                    // 2nd bearish
+                    // 3rd bearish
+                    // 4th bullish
+                    // 5th bullish
+                    // Signal keluar pada candle ke-6 open
+                    buy4thPattern =
+                         bar_index >= 4 and
+                         isBull(4) and
+                         isBear(3) and
+                         isBear(2) and
+                         isBull(1) and
+                         isBull(0)
+
+                    //==========================
+                    // SELL LOGIC VICE VERSA
+                    //==========================
+
+                    // SELL 1st:
+                    // 1st bullish
+                    // 2nd bearish
+                    // 3rd bullish
+                    // 4th bullish
+                    // 5th bullish
+                    // 6th bearish
+                    // 7th bearish
+                    sell1stPattern =
+                         bar_index >= 6 and
+                         isBull(6) and
+                         isBear(5) and
+                         isBull(4) and
+                         isBull(3) and
+                         isBull(2) and
+                         isBear(1) and
+                         isBear(0)
+
+                    // SELL 2nd:
+                    // 1st bearish
+                    // 2nd bullish
+                    // 3rd bullish
+                    // 4th bullish
+                    // 5th bullish
+                    // 6th bearish
+                    sell2ndPattern =
+                         bar_index >= 5 and
+                         isBear(5) and
+                         isBull(4) and
+                         isBull(3) and
+                         isBull(2) and
+                         isBull(1) and
+                         isBear(0)
+
+                    // SELL 3rd:
+                    // 1st bearish
+                    // 2nd bullish dengan body besar
+                    // 3rd bullish dengan body besar + upper wick rejection
+                    // 2nd candle tidak engulf 3rd candle
+                    sell3rdPattern =
+                         bar_index >= 2 and
+                         isBear(2) and
+                         isBull(1) and
+                         isBull(0) and
+                         thirdSettingBigBodyOK and
+                         sell3rdRejectionOK and
+                         not (high[1] < high[0] and low[1] > low[0])
+
+                    // SELL 4th:
+                    // 1st bearish
+                    // 2nd bullish
+                    // 3rd bullish
+                    // 4th bearish
+                    // 5th bearish
+                    // Signal keluar pada candle ke-6 open
+                    sell4thPattern =
+                         bar_index >= 4 and
+                         isBear(4) and
+                         isBull(3) and
+                         isBull(2) and
+                         isBear(1) and
+                         isBear(0)
+
+                    //==========================
+                    // SIGNAL ON NEXT CANDLE OPEN
+                    // Signal keluar pada candle selepas pattern complete
+                    // M6 TIMEFRAME FILTER untuk Setup 1st, 2nd, 3rd, 4th
+                    //==========================
+                    buy1stOpen =
+                         barstate.isnew and
+                         bar_index >= 7 and
+                         buy1stPattern[1] and
+                         buyZoneOK[1] and
+                         isM6Timeframe
+
+                    buy2ndOpen =
+                         barstate.isnew and
+                         bar_index >= 6 and
+                         buy2ndPattern[1] and
+                         buyZoneOK[1] and
+                         isM6Timeframe
+
+                    buy3rdOpen =
+                         barstate.isnew and
+                         bar_index >= 3 and
+                         buy3rdPattern[1] and
+                         buyZoneOK[1] and
+                         isM6Timeframe
+
+                    buy4thOpen =
+                         barstate.isnew and
+                         bar_index >= 5 and
+                         buy4thPattern[1] and
+                         buyZoneOK[1] and
+                         isM6Timeframe
+
+                    sell1stOpen =
+                         barstate.isnew and
+                         bar_index >= 7 and
+                         sell1stPattern[1] and
+                         sellZoneOK[1] and
+                         isM6Timeframe
+
+                    sell2ndOpen =
+                         barstate.isnew and
+                         bar_index >= 6 and
+                         sell2ndPattern[1] and
+                         sellZoneOK[1] and
+                         isM6Timeframe
+
+                    sell3rdOpen =
+                         barstate.isnew and
+                         bar_index >= 3 and
+                         sell3rdPattern[1] and
+                         sellZoneOK[1] and
+                         isM6Timeframe
+
+                    sell4thOpen =
+                         barstate.isnew and
+                         bar_index >= 5 and
+                         sell4thPattern[1] and
+                         sellZoneOK[1] and
+                         isM6Timeframe
+
+                    //==========================
+                    // PLOT SIGNALS
+                    //==========================
+                    plotshape(
+                         buy1stOpen,
+                         title="BUY SET 1",
+                         style=shape.labelup,
+                         location=location.belowbar,
+                         color=color.lime,
+                         text="BUY\n1st",
+                         textcolor=color.black,
+                         size=size.small)
+
+                    plotshape(
+                         buy2ndOpen,
+                         title="BUY SET 2",
+                         style=shape.labelup,
+                         location=location.belowbar,
+                         color=color.aqua,
+                         text="BUY\n2nd",
+                         textcolor=color.black,
+                         size=size.small)
+
+                    plotshape(
+                         buy3rdOpen,
+                         title="BUY SET 3",
+                         style=shape.labelup,
+                         location=location.belowbar,
+                         color=color.yellow,
+                         text="BUY\n3rd",
+                         textcolor=color.black,
+                         size=size.small)
+
+                    plotshape(
+                         buy4thOpen,
+                         title="BUY SET 4",
+                         style=shape.labelup,
+                         location=location.belowbar,
+                         color=color.green,
+                         text="BUY\n4th",
+                         textcolor=color.white,
+                         size=size.small)
+
+                    plotshape(
+                         sell1stOpen,
+                         title="SELL SET 1",
+                         style=shape.labeldown,
+                         location=location.abovebar,
+                         color=color.red,
+                         text="SELL\n1st",
+                         textcolor=color.white,
+                         size=size.small)
+
+                    plotshape(
+                         sell2ndOpen,
+                         title="SELL SET 2",
+                         style=shape.labeldown,
+                         location=location.abovebar,
+                         color=color.orange,
+                         text="SELL\n2nd",
+                         textcolor=color.white,
+                         size=size.small)
+
+                    plotshape(
+                         sell3rdOpen,
+                         title="SELL SET 3",
+                         style=shape.labeldown,
+                         location=location.abovebar,
+                         color=color.fuchsia,
+                         text="SELL\n3rd",
+                         textcolor=color.white,
+                         size=size.small)
+
+                    plotshape(
+                         sell4thOpen,
+                         title="SELL SET 4",
+                         style=shape.labeldown,
+                         location=location.abovebar,
+                         color=color.maroon,
+                         text="SELL\n4th",
+                         textcolor=color.white,
+                         size=size.small)
+
+                    //==========================
+                    // ANY SIGNAL
+                    //==========================
+                    anyBuySignal =
+                         buy1stOpen or
+                         buy2ndOpen or
+                         buy3rdOpen or
+                         buy4thOpen
+
+                    anySellSignal =
+                         sell1stOpen or
+                         sell2ndOpen or
+                         sell3rdOpen or
+                         sell4thOpen
+
+                    anySignal =
+                         anyBuySignal or
+                         anySellSignal
+
+                    //==========================
+                    // ALERT FUNCTION
+                    // Use TradingView: Any alert() function call
+                    // Options: Once Per Bar
+                    //==========================
+                    if enableAlerts and buy1stOpen
+                        alert("BUY 1st Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+                    if enableAlerts and buy2ndOpen
+                        alert("BUY 2nd Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+                    if enableAlerts and buy3rdOpen
+                        alert("BUY 3rd Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open | Rejection Filter OK", alert.freq_once_per_bar)
+
+                    if enableAlerts and buy4thOpen
+                        alert("BUY 4th Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+                    if enableAlerts and sell1stOpen
+                        alert("SELL 1st Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+                    if enableAlerts and sell2ndOpen
+                        alert("SELL 2nd Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+                    if enableAlerts and sell3rdOpen
+                        alert("SELL 3rd Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open | Rejection Filter OK", alert.freq_once_per_bar)
+
+                    if enableAlerts and sell4thOpen
+                        alert("SELL 4th Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+                    //==========================
+                    // ALERT CONDITIONS
+                    //==========================
+                    alertcondition(anySignal, title="ANY BUY SELL SIGNAL - BAR OPEN", message="ANY BUY SELL SIGNAL - BAR OPEN")
+                    alertcondition(anyBuySignal, title="ANY BUY SIGNAL - BAR OPEN", message="ANY BUY SIGNAL - BAR OPEN")
+                    alertcondition(anySellSignal, title="ANY SELL SIGNAL - BAR OPEN", message="ANY SELL SIGNAL - BAR OPEN")
+
+                    alertcondition(buy1stOpen, title="BUY 1st Setting - BAR OPEN", message="BUY - 1st Setting at new bar open")
+                    alertcondition(buy2ndOpen, title="BUY 2nd Setting - BAR OPEN", message="BUY - 2nd Setting at new bar open")
+                    alertcondition(buy3rdOpen, title="BUY 3rd Setting - BAR OPEN", message="BUY - 3rd Setting at new bar open")
+                    alertcondition(buy4thOpen, title="BUY 4th Setting - BAR OPEN", message="BUY - 4th Setting at new bar open")
+
+                    alertcondition(sell1stOpen, title="SELL 1st Setting - BAR OPEN", message="SELL - 1st Setting at new bar open")
+                    alertcondition(sell2ndOpen, title="SELL 2nd Setting - BAR OPEN", message="SELL - 2nd Setting at new bar open")
+                    alertcondition(sell3rdOpen, title="SELL 3rd Setting - BAR OPEN", message="SELL - 3rd Setting at new bar open")
+                    alertcondition(sell4thOpen, title="SELL 4th Setting - BAR OPEN", message="SELL - 4th Setting at new bar open")

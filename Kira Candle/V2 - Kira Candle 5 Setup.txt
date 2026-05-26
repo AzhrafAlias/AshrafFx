@@ -1,0 +1,719 @@
+//@version=5
+indicator("Custom Candle Pattern + Last 5 Support Resistance + Bar Open Alert", overlay=true, max_lines_count=500, max_labels_count=500)
+
+//=========================
+// TIMEFRAME FILTER
+//=========================
+isM6Timeframe = timeframe.period == "6"
+isM20Timeframe = timeframe.period == "20"
+
+//=========================
+// INPUT
+//=========================
+useSNRFilter       = input.bool(false, "Only Show Signal Near S/R")
+pivotLen           = input.int(3, "Pivot Length", minval=1)
+
+snrTolerancePips   = input.float(20, "Signal Distance From S/R (pips)")
+showSRLines        = input.bool(false, "Show Last 5 Support / Resistance Lines")
+lineExtendBars     = input.int(50, "Line Extend Bars", minval=1)
+
+enableAlerts       = input.bool(true, "Enable Alerts")
+
+resColor = input.color(color.red, "Resistance Line Color")
+supColor = input.color(color.lime, "Support Line Color")
+lineWidth = input.int(2, "S/R Line Width", minval=1, maxval=5)
+
+//=========================
+// 5TH SETTING INPUT
+//=========================
+touchTolerancePips = input.float(5, "5th Setting Touch Tolerance (pips)", step=0.1)
+maxBarsLookback5th = input.int(50, "5th Setting Max Bars Lookback", minval=10)
+
+//=========================
+// 3RD SETTING BODY FILTER
+//=========================
+use3rdBodyFilter = input.bool(true, "Use 3rd Setting Big Body Filter")
+
+min3rdBodyPips =
+     input.float(25, "Min EACH Candle Body For 3rd Setting (pips)", step=0.1)
+
+min3rdAvgBodyPips =
+     input.float(25, "Min Average Body For 3rd Setting (pips)", step=0.1)
+
+//=========================
+// 3RD SETTING REJECTION FILTER
+//=========================
+use3rdRejectionFilter =
+     input.bool(true, "Use 3rd Setting Rejection Wick Filter")
+
+wickBodyRatio =
+     input.float(0.8, "Min Wick / Body Ratio For 3rd Setting", step=0.1)
+
+minRejectionWickPips =
+     input.float(8, "Min Rejection Wick Size For 3rd Setting (pips)", step=0.1)
+
+//=========================
+// PIP VALUE
+//=========================
+pipValue          = syminfo.mintick * 10
+snrToleranceValue = snrTolerancePips * pipValue
+min3rdBodyValue   = min3rdBodyPips * pipValue
+min3rdAvgValue    = min3rdAvgBodyPips * pipValue
+minRejectionWickValue = minRejectionWickPips * pipValue
+touchToleranceValue = touchTolerancePips * pipValue
+
+//=========================
+// BODY HIGH LOW
+//=========================
+bodyHigh = math.max(open, close)
+bodyLow  = math.min(open, close)
+
+//=========================
+// BODY / WICK FUNCTIONS
+//=========================
+bodySize(i) =>
+    math.abs(close[i] - open[i])
+
+upperWick(i) =>
+    high[i] - math.max(open[i], close[i])
+
+lowerWick(i) =>
+    math.min(open[i], close[i]) - low[i]
+
+//=========================
+// 3RD SETTING BODY FILTER LOGIC
+// Candle 2 = index 2
+// Candle 3 = index 1
+//=========================
+secondCandleBody =
+     bodySize(2)
+
+thirdCandleBody =
+     bodySize(1)
+
+avgSecondThirdBody =
+     (secondCandleBody + thirdCandleBody) / 2
+
+thirdSettingBigBodyOK =
+     not use3rdBodyFilter or
+     (
+         secondCandleBody >= min3rdBodyValue and
+         thirdCandleBody >= min3rdBodyValue and
+         avgSecondThirdBody >= min3rdAvgValue
+     )
+
+//=========================
+// 3RD SETTING REJECTION FILTER LOGIC
+// BUY 3rd perlu lower wick pada candle ke-3
+// SELL 3rd perlu upper wick pada candle ke-3
+//=========================
+buy3rdRejectionOK =
+     not use3rdRejectionFilter or
+     (
+         lowerWick(1) >= thirdCandleBody * wickBodyRatio and
+         lowerWick(1) >= minRejectionWickValue
+     )
+
+sell3rdRejectionOK =
+     not use3rdRejectionFilter or
+     (
+         upperWick(1) >= thirdCandleBody * wickBodyRatio and
+         upperWick(1) >= minRejectionWickValue
+     )
+
+//=========================
+// PIVOT DETECTION
+// Resistance = pivot high
+// Support    = pivot low
+//=========================
+ph = ta.pivothigh(bodyHigh, pivotLen, pivotLen)
+pl = ta.pivotlow(bodyLow, pivotLen, pivotLen)
+
+//=========================
+// STORE LAST 5 RESISTANCE / SUPPORT
+//=========================
+var float[] lastRes = array.new_float()
+var int[]   lastResBar = array.new_int()
+
+var float[] lastSup = array.new_float()
+var int[]   lastSupBar = array.new_int()
+
+if not na(ph)
+    array.unshift(lastRes, ph)
+    array.unshift(lastResBar, bar_index - pivotLen)
+
+    if array.size(lastRes) > 5
+        array.pop(lastRes)
+        array.pop(lastResBar)
+
+if not na(pl)
+    array.unshift(lastSup, pl)
+    array.unshift(lastSupBar, bar_index - pivotLen)
+
+    if array.size(lastSup) > 5
+        array.pop(lastSup)
+        array.pop(lastSupBar)
+
+//=========================
+// FIXED LINE ARRAYS
+//=========================
+var line[] resLines = array.new_line(5, na)
+var line[] supLines = array.new_line(5, na)
+
+//=========================
+// DRAW / UPDATE LAST 5 S/R LINES
+//=========================
+for i = 0 to 4
+    //=====================
+    // RESISTANCE LINES
+    //=====================
+    resLine = array.get(resLines, i)
+
+    if showSRLines and i < array.size(lastRes)
+        resPrice = array.get(lastRes, i)
+        resBar   = array.get(lastResBar, i)
+
+        if na(resLine)
+            resLine := line.new(
+                 resBar,
+                 resPrice,
+                 bar_index + lineExtendBars,
+                 resPrice,
+                 color=resColor,
+                 width=lineWidth)
+
+            array.set(resLines, i, resLine)
+        else
+            line.set_xy1(resLine, resBar, resPrice)
+            line.set_xy2(resLine, bar_index + lineExtendBars, resPrice)
+            line.set_color(resLine, resColor)
+            line.set_width(resLine, lineWidth)
+    else
+        if not na(resLine)
+            line.delete(resLine)
+            array.set(resLines, i, na)
+
+    //=====================
+    // SUPPORT LINES
+    //=====================
+    supLine = array.get(supLines, i)
+
+    if showSRLines and i < array.size(lastSup)
+        supPrice = array.get(lastSup, i)
+        supBar   = array.get(lastSupBar, i)
+
+        if na(supLine)
+            supLine := line.new(
+                 supBar,
+                 supPrice,
+                 bar_index + lineExtendBars,
+                 supPrice,
+                 color=supColor,
+                 width=lineWidth)
+
+            array.set(supLines, i, supLine)
+        else
+            line.set_xy1(supLine, supBar, supPrice)
+            line.set_xy2(supLine, bar_index + lineExtendBars, supPrice)
+            line.set_color(supLine, supColor)
+            line.set_width(supLine, lineWidth)
+    else
+        if not na(supLine)
+            line.delete(supLine)
+            array.set(supLines, i, na)
+
+//=========================
+// PRICE NEAR LAST 5 SUPPORT / RESISTANCE
+// BUY near support
+// SELL near resistance
+//=========================
+nearSupport = false
+nearResistance = false
+
+if array.size(lastSup) > 0
+    for i = 0 to array.size(lastSup) - 1
+        supPriceCheck = array.get(lastSup, i)
+        nearSupport := nearSupport or math.abs(close - supPriceCheck) <= snrToleranceValue
+
+if array.size(lastRes) > 0
+    for i = 0 to array.size(lastRes) - 1
+        resPriceCheck = array.get(lastRes, i)
+        nearResistance := nearResistance or math.abs(close - resPriceCheck) <= snrToleranceValue
+
+buyZoneOK  = not useSNRFilter or nearSupport
+sellZoneOK = not useSNRFilter or nearResistance
+
+//==========================
+// CANDLE FUNCTIONS
+//==========================
+isBull(i) =>
+    close[i] > open[i]
+
+isBear(i) =>
+    close[i] < open[i]
+
+//==========================
+// 5TH SETTING LOGIC - M20 ONLY
+//==========================
+// Detect BUY 5th Setup Pattern:
+// 1st: Bearish, 2nd: Bullish, 3rd: Bullish
+// Store low of 1st candle untuk detection
+
+var float buy5thTriggerPrice = na
+var int buy5thTriggerBar = na
+var bool buy5thPatternActive = false
+
+// Detect SELL 5th Setup Pattern:
+// 1st: Bullish, 2nd: Bearish, 3rd: Bearish
+// Store high of 1st candle untuk detection
+
+var float sell5thTriggerPrice = na
+var int sell5thTriggerBar = na
+var bool sell5thPatternActive = false
+
+// BUY 5th Pattern Detection
+if isM20Timeframe and bar_index >= 2
+    if isBear(2) and isBull(1) and isBull(0)
+        buy5thPatternActive := true
+        buy5thTriggerPrice := low[2]
+        buy5thTriggerBar := bar_index - 2
+    
+    // Reset jika terlalu lama (max lookback)
+    if buy5thPatternActive and bar_index - buy5thTriggerBar > maxBarsLookback5th
+        buy5thPatternActive := false
+        buy5thTriggerPrice := na
+
+// SELL 5th Pattern Detection
+if isM20Timeframe and bar_index >= 2
+    if isBull(2) and isBear(1) and isBear(0)
+        sell5thPatternActive := true
+        sell5thTriggerPrice := high[2]
+        sell5thTriggerBar := bar_index - 2
+    
+    // Reset jika terlalu lama (max lookback)
+    if sell5thPatternActive and bar_index - sell5thTriggerBar > maxBarsLookback5th
+        sell5thPatternActive := false
+        sell5thTriggerPrice := na
+
+// Check if current candle touch the trigger price
+buy5thTouched = 
+     buy5thPatternActive and 
+     not na(buy5thTriggerPrice) and
+     low <= buy5thTriggerPrice + touchToleranceValue and
+     low >= buy5thTriggerPrice - touchToleranceValue
+
+sell5thTouched = 
+     sell5thPatternActive and 
+     not na(sell5thTriggerPrice) and
+     high >= sell5thTriggerPrice - touchToleranceValue and
+     high <= sell5thTriggerPrice + touchToleranceValue
+
+// Signal keluar dan reset pattern
+var bool buy5thSignalTriggered = false
+var bool sell5thSignalTriggered = false
+
+if buy5thTouched and not buy5thSignalTriggered
+    buy5thSignalTriggered := true
+else if not buy5thTouched
+    buy5thSignalTriggered := false
+
+if sell5thTouched and not sell5thSignalTriggered
+    sell5thSignalTriggered := true
+else if not sell5thTouched
+    sell5thSignalTriggered := false
+
+// Reset pattern selepas signal
+if buy5thSignalTriggered
+    buy5thPatternActive := false
+
+if sell5thSignalTriggered
+    sell5thPatternActive := false
+
+//==========================
+// BUY LOGIC
+//==========================
+
+// BUY 1st:
+// 1st bearish
+// 2nd bullish
+// 3rd bearish
+// 4th bearish
+// 5th bearish
+// 6th bullish
+// 7th bullish
+buy1stPattern =
+     bar_index >= 6 and
+     isBear(6) and
+     isBull(5) and
+     isBear(4) and
+     isBear(3) and
+     isBear(2) and
+     isBull(1) and
+     isBull(0)
+
+// BUY 2nd:
+// 1st bullish
+// 2nd bearish
+// 3rd bearish
+// 4th bearish
+// 5th bearish
+// 6th bullish
+buy2ndPattern =
+     bar_index >= 5 and
+     isBull(5) and
+     isBear(4) and
+     isBear(3) and
+     isBear(2) and
+     isBear(1) and
+     isBull(0)
+
+// BUY 3rd NEW LOGIC:
+// 1st candle [3]: Bullish
+// 2nd candle [2]: Bearish (tak engulf 1st candle)
+// 3rd candle [1]: Bearish
+// 4th candle [0]: Break high 3rd candle
+buy3rdPattern =
+     bar_index >= 3 and
+     isBull(3) and
+     isBear(2) and
+     isBear(1) and
+     not (high[2] >= high[3] and low[2] <= low[3]) and
+     thirdSettingBigBodyOK and
+     buy3rdRejectionOK and
+     high[0] > high[1]
+
+// BUY 4th:
+// 1st bullish
+// 2nd bearish
+// 3rd bearish
+// 4th bullish
+// 5th bullish
+// Signal keluar pada candle ke-6 open
+buy4thPattern =
+     bar_index >= 4 and
+     isBull(4) and
+     isBear(3) and
+     isBear(2) and
+     isBull(1) and
+     isBull(0)
+
+//==========================
+// SELL LOGIC VICE VERSA
+//==========================
+
+// SELL 1st:
+// 1st bullish
+// 2nd bearish
+// 3rd bullish
+// 4th bullish
+// 5th bullish
+// 6th bearish
+// 7th bearish
+sell1stPattern =
+     bar_index >= 6 and
+     isBull(6) and
+     isBear(5) and
+     isBull(4) and
+     isBull(3) and
+     isBull(2) and
+     isBear(1) and
+     isBear(0)
+
+// SELL 2nd:
+// 1st bearish
+// 2nd bullish
+// 3rd bullish
+// 4th bullish
+// 5th bullish
+// 6th bearish
+sell2ndPattern =
+     bar_index >= 5 and
+     isBear(5) and
+     isBull(4) and
+     isBull(3) and
+     isBull(2) and
+     isBull(1) and
+     isBear(0)
+
+// SELL 3rd NEW LOGIC (vice versa):
+// 1st candle [3]: Bearish
+// 2nd candle [2]: Bullish (tak engulf 1st candle)
+// 3rd candle [1]: Bullish
+// 4th candle [0]: Break low 3rd candle
+sell3rdPattern =
+     bar_index >= 3 and
+     isBear(3) and
+     isBull(2) and
+     isBull(1) and
+     not (high[2] >= high[3] and low[2] <= low[3]) and
+     thirdSettingBigBodyOK and
+     sell3rdRejectionOK and
+     low[0] < low[1]
+
+// SELL 4th:
+// 1st bearish
+// 2nd bullish
+// 3rd bullish
+// 4th bearish
+// 5th bearish
+// Signal keluar pada candle ke-6 open
+sell4thPattern =
+     bar_index >= 4 and
+     isBear(4) and
+     isBull(3) and
+     isBull(2) and
+     isBear(1) and
+     isBear(0)
+
+//==========================
+// SIGNAL ON NEXT CANDLE OPEN
+// Signal keluar pada candle selepas pattern complete
+// M6 TIMEFRAME FILTER untuk Setup 1st, 2nd, 3rd, 4th
+// M20 TIMEFRAME FILTER untuk Setup 5th
+// KECUALI 3rd setting - signal keluar masa real-time bila break
+//==========================
+buy1stOpen =
+     barstate.isnew and
+     bar_index >= 7 and
+     buy1stPattern[1] and
+     buyZoneOK[1] and
+     isM6Timeframe
+
+buy2ndOpen =
+     barstate.isnew and
+     bar_index >= 6 and
+     buy2ndPattern[1] and
+     buyZoneOK[1] and
+     isM6Timeframe
+
+// 3rd setting signal real-time (tidak tunggu bar open)
+buy3rdOpen =
+     bar_index >= 3 and
+     buy3rdPattern and
+     buyZoneOK and
+     isM6Timeframe
+
+buy4thOpen =
+     barstate.isnew and
+     bar_index >= 5 and
+     buy4thPattern[1] and
+     buyZoneOK[1] and
+     isM6Timeframe
+
+// 5th setting signal real-time (M20 only)
+buy5thOpen =
+     buy5thTouched and
+     buy5thSignalTriggered and
+     buyZoneOK and
+     isM20Timeframe
+
+sell1stOpen =
+     barstate.isnew and
+     bar_index >= 7 and
+     sell1stPattern[1] and
+     sellZoneOK[1] and
+     isM6Timeframe
+
+sell2ndOpen =
+     barstate.isnew and
+     bar_index >= 6 and
+     sell2ndPattern[1] and
+     sellZoneOK[1] and
+     isM6Timeframe
+
+// 3rd setting signal real-time (tidak tunggu bar open)
+sell3rdOpen =
+     bar_index >= 3 and
+     sell3rdPattern and
+     sellZoneOK and
+     isM6Timeframe
+
+sell4thOpen =
+     barstate.isnew and
+     bar_index >= 5 and
+     sell4thPattern[1] and
+     sellZoneOK[1] and
+     isM6Timeframe
+
+// 5th setting signal real-time (M20 only)
+sell5thOpen =
+     sell5thTouched and
+     sell5thSignalTriggered and
+     sellZoneOK and
+     isM20Timeframe
+
+//==========================
+// PLOT SIGNALS
+//==========================
+plotshape(
+     buy1stOpen,
+     title="BUY 1Biru 3Merah 2Biru",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.lime,
+     text="BUY |\n1Biru 3Merah 2Biru",
+     textcolor=color.black,
+     size=size.small)
+
+plotshape(
+     buy2ndOpen,
+     title="BUY 4Merah 1Biru",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.aqua,
+     text="BUY |\n4Merah 1Biru",
+     textcolor=color.black,
+     size=size.small)
+
+plotshape(
+     buy3rdOpen,
+     title="BUY 2Merah 2Biru",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.yellow,
+     text="BUY |\n2Merah 2Biru",
+     textcolor=color.black,
+     size=size.small)
+
+plotshape(
+     buy4thOpen,
+     title="BUY 1Biru 2Merah 2Biru",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.green,
+     text="BUY |\n1Biru 2Merah 2Biru",
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(
+     buy5thOpen,
+     title="BUY 1Merah 2Biru",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.blue,
+     text="BUY |\n1Merah 2Biru",
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(
+     sell1stOpen,
+     title="SELL 1Merah 3Biru 2Merah",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.red,
+     text="SELL |\n1Merah 3Biru 2Merah",
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(
+     sell2ndOpen,
+     title="SELL 4Biru 1Merah",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.orange,
+     text="SELL |\n4Biru 1Merah",
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(
+     sell3rdOpen,
+     title="SELL 2Biru 2Merah",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.fuchsia,
+     text="SELL |\n2Biru 2Merah",
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(
+     sell4thOpen,
+     title="SELL 1Merah 2Biru 2Merah",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.maroon,
+     text="SELL |\n1Merah 2Biru 2Merah",
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(
+     sell5thOpen,
+     title="SELL 1Biru 2Merah",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.purple,
+     text="SELL |\n1Biru 2Merah",
+     textcolor=color.white,
+     size=size.small)
+
+//==========================
+// ANY SIGNAL
+//==========================
+anyBuySignal =
+     buy1stOpen or
+     buy2ndOpen or
+     buy3rdOpen or
+     buy4thOpen or
+     buy5thOpen
+
+anySellSignal =
+     sell1stOpen or
+     sell2ndOpen or
+     sell3rdOpen or
+     sell4thOpen or
+     sell5thOpen
+
+anySignal =
+     anyBuySignal or
+     anySellSignal
+
+//==========================
+// ALERT FUNCTION
+//==========================
+if enableAlerts and buy1stOpen
+    alert("BUY | 1Biru 3Merah 2Biru | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and buy2ndOpen
+    alert("BUY | 4Merah 1Biru | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and buy3rdOpen
+    alert("BUY | 2Merah 2Biru | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and buy4thOpen
+    alert("BUY | 1Biru 2Merah 2Biru | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and buy5thOpen
+    alert("BUY | 1Merah 2Biru | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and sell1stOpen
+    alert("SELL | 1Merah 3Biru 2Merah | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and sell2ndOpen
+    alert("SELL | 4Biru 1Merah | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and sell3rdOpen
+    alert("SELL | 2Biru 2Merah | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and sell4thOpen
+    alert("SELL | 1Merah 2Biru 2Merah | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and sell5thOpen
+    alert("SELL | 1Biru 2Merah | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+//==========================
+// ALERT CONDITIONS
+//==========================
+alertcondition(anySignal, title="ANY SIGNAL", message="ANY BUY SELL SIGNAL")
+alertcondition(anyBuySignal, title="ANY BUY SIGNAL", message="ANY BUY SIGNAL")
+alertcondition(anySellSignal, title="ANY SELL SIGNAL", message="ANY SELL SIGNAL")
+
+alertcondition(buy1stOpen, title="BUY 1Biru 3Merah 2Biru", message="BUY | 1Biru 3Merah 2Biru")
+alertcondition(buy2ndOpen, title="BUY 4Merah 1Biru", message="BUY | 4Merah 1Biru")
+alertcondition(buy3rdOpen, title="BUY 2Merah 2Biru", message="BUY | 2Merah 2Biru")
+alertcondition(buy4thOpen, title="BUY 1Biru 2Merah 2Biru", message="BUY | 1Biru 2Merah 2Biru")
+alertcondition(buy5thOpen, title="BUY 1Merah 2Biru", message="BUY | 1Merah 2Biru")
+
+alertcondition(sell1stOpen, title="SELL 1Merah 3Biru 2Merah", message="SELL | 1Merah 3Biru 2Merah")
+alertcondition(sell2ndOpen, title="SELL 4Biru 1Merah", message="SELL | 4Biru 1Merah")
+alertcondition(sell3rdOpen, title="SELL 2Biru 2Merah", message="SELL | 2Biru 2Merah")
+alertcondition(sell4thOpen, title="SELL 1Merah 2Biru 2Merah", message="SELL | 1Merah 2Biru 2Merah")
+alertcondition(sell5thOpen, title="SELL 1Biru 2Merah", message="SELL | 1Biru 2Merah")

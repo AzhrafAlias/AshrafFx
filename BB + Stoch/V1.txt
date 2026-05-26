@@ -1,0 +1,174 @@
+﻿//@version=5
+indicator("BB + Stochastic | Shadow + Engulfing Setup", overlay=true)
+
+//=========================
+// INPUT - BOLLINGER BAND
+//=========================
+bbLen      = input.int(20, "BB Length", minval=1)
+bbMult     = input.float(2.0, "BB StdDev Multiplier", step=0.1)
+bbSrc      = input.source(close, "BB Source")
+
+//=========================
+// INPUT - STOCHASTIC
+//=========================
+stochKLen    = input.int(5, "%K Period", minval=1)
+stochDLen    = input.int(3, "%D Period", minval=1)
+stochSlowing = input.int(3, "Slowing", minval=1)
+stochOB      = input.float(80, "Overbought Level", minval=50, maxval=100)
+stochOS      = input.float(20, "Oversold Level", minval=0, maxval=50)
+
+//=========================
+// INPUT - ALERTS
+//=========================
+enableAlerts = input.bool(true, "Enable Alerts")
+
+//=========================
+// BOLLINGER BAND CALCULATION
+//=========================
+bbBasis = ta.sma(bbSrc, bbLen)
+bbDev   = bbMult * ta.stdev(bbSrc, bbLen)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+
+//=========================
+// PLOT BOLLINGER BAND
+//=========================
+plot(bbBasis, title="BB Mid", color=color.orange, linewidth=1)
+p1 = plot(bbUpper, title="BB Upper", color=color.red, linewidth=1)
+p2 = plot(bbLower, title="BB Lower", color=color.green, linewidth=1)
+fill(p1, p2, title="BB Fill", color=color.new(color.gray, 90))
+
+//=========================
+// STOCHASTIC CALCULATION
+// Price Field: Low/High, Method: Simple (SMA)
+//=========================
+rawK = ta.stoch(close, high, low, stochKLen)
+k    = ta.sma(rawK, stochSlowing)
+d    = ta.sma(k, stochDLen)
+
+//=========================
+// CANDLE HELPERS
+//=========================
+bodyHigh = math.max(open, close)
+bodyLow  = math.min(open, close)
+
+isBull(i) => close[i] > open[i]
+isBear(i) => close[i] < open[i]
+
+//=========================
+// CONDITION 1: SHADOW ONLY CUCUK BB
+// BUY: Hanya shadow (wick) cucuk Lower BB, body TIDAK keluar
+// SELL: Hanya shadow (wick) cucuk Upper BB, body TIDAK keluar
+//=========================
+shadowCucukLowerBB = low <= bbLower and bodyLow > bbLower
+shadowCucukUpperBB = high >= bbUpper and bodyHigh < bbUpper
+
+//=========================
+// CONDITION 2: ENGULFING PATTERN MASA CUCUK BB
+// BUY Engulfing: Bullish [0] engulf Bearish [1] (kanan engulf kiri)
+// SELL Engulfing: Bearish [0] engulf Bullish [1] (kanan engulf kiri)
+// Mesti berlaku masa cucuk BB
+//=========================
+buyEngulfing = 
+     isBull(0) and 
+     isBear(1) and
+     bodyHigh >= math.max(open[1], close[1]) and
+     bodyLow <= math.min(open[1], close[1]) and
+     low <= bbLower
+
+sellEngulfing = 
+     isBear(0) and 
+     isBull(1) and
+     bodyHigh >= math.max(open[1], close[1]) and
+     bodyLow <= math.min(open[1], close[1]) and
+     high >= bbUpper
+
+//=========================
+// STOCHASTIC FILTER
+//=========================
+stochOversold   = k <= stochOS
+stochOverbought = k >= stochOB
+
+//=========================
+// SIGNAL LOGIC
+// SOLID BUY: Shadow cucuk Lower BB + Engulfing Buy + Stoch ≤ 20
+// BUY: Salah satu (Shadow OR Engulfing) + Stoch ≤ 20
+//
+// SOLID SELL: Shadow cucuk Upper BB + Engulfing Sell + Stoch ≥ 80
+// SELL: Salah satu (Shadow OR Engulfing) + Stoch ≥ 80
+//=========================
+
+// SOLID = shadow cucuk + engulfing serentak
+solidBuy  = shadowCucukLowerBB and buyEngulfing and stochOversold
+solidSell = shadowCucukUpperBB and sellEngulfing and stochOverbought
+
+// Normal = salah satu sahaja
+normalBuy  = ((shadowCucukLowerBB or buyEngulfing) and stochOversold) and not solidBuy
+normalSell = ((shadowCucukUpperBB or sellEngulfing) and stochOverbought) and not solidSell
+
+//=========================
+// PLOT SIGNALS
+//=========================
+plotshape(
+     solidBuy,
+     title="SOLID BUY",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.lime,
+     text="SOLID\nBUY",
+     textcolor=color.black,
+     size=size.normal)
+
+plotshape(
+     normalBuy,
+     title="BUY",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.green,
+     text="BUY",
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(
+     solidSell,
+     title="SOLID SELL",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.red,
+     text="SOLID\nSELL",
+     textcolor=color.white,
+     size=size.normal)
+
+plotshape(
+     normalSell,
+     title="SELL",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.maroon,
+     text="SELL",
+     textcolor=color.white,
+     size=size.small)
+
+//=========================
+// ALERTS
+//=========================
+if enableAlerts and solidBuy
+    alert("SOLID BUY | Shadow Cucuk Lower BB + Engulfing Buy + Stoch OS | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and normalBuy
+    alert("BUY | " + (shadowCucukLowerBB ? "Shadow Cucuk Lower BB" : "Engulfing Buy") + " + Stoch OS | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and solidSell
+    alert("SOLID SELL | Shadow Cucuk Upper BB + Engulfing Sell + Stoch OB | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and normalSell
+    alert("SELL | " + (shadowCucukUpperBB ? "Shadow Cucuk Upper BB" : "Engulfing Sell") + " + Stoch OB | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+//=========================
+// ALERT CONDITIONS
+//=========================
+alertcondition(solidBuy, title="SOLID BUY", message="SOLID BUY | Shadow + Engulfing + Stoch Oversold")
+alertcondition(solidSell, title="SOLID SELL", message="SOLID SELL | Shadow + Engulfing + Stoch Overbought")
+alertcondition(normalBuy, title="BUY", message="BUY | Shadow or Engulfing + Stoch Oversold")
+alertcondition(normalSell, title="SELL", message="SELL | Shadow or Engulfing + Stoch Overbought")
+alertcondition(solidBuy or solidSell or normalBuy or normalSell, title="ANY SIGNAL", message="BB + Stoch Signal Detected")

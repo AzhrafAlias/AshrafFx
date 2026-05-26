@@ -1,0 +1,414 @@
+//@version=5
+indicator("Custom Candle Pattern Signal + RBS SBR Lines + Bar Open Alert", overlay=true, max_lines_count=500, max_labels_count=500)
+
+//=========================
+// INPUT SNR / RBS / SBR
+//=========================
+useSNRFilter   = input.bool(false, "Only Show Signal At RBS / SBR")
+pivotLen       = input.int(3, "Pivot Length", minval=1)
+
+minBreakPips      = input.float(30, "Min Break Candle (pips)")
+snrTolerancePips  = input.float(20, "Signal Distance From RBS/SBR (pips)")
+useCloseBreak     = input.bool(true, "Use Body Close For Breakout")
+
+showSBRRBSLines = input.bool(true, "Show SBR / RBS Lines")
+lineExtendBars  = input.int(20, "Line Extend Bars", minval=1)
+
+//=========================
+// ALERT INPUT
+//=========================
+enableAlerts = input.bool(true, "Enable Any Alert Function")
+
+//=========================
+// EMA TREND FILTER
+//=========================
+useTrendFilter = input.bool(false, "Use EMA Trend Filter")
+trendTF        = input.timeframe("5", "Trend TF")
+emaLen         = input.int(50, "EMA Length")
+
+trendClose = request.security(
+     syminfo.tickerid,
+     trendTF,
+     close,
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off)
+
+trendEMA = request.security(
+     syminfo.tickerid,
+     trendTF,
+     ta.ema(close, emaLen),
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off)
+
+trendBuyOK  = not useTrendFilter or trendClose > trendEMA
+trendSellOK = not useTrendFilter or trendClose < trendEMA
+
+//=========================
+// PIP VALUE
+//=========================
+pipValue = syminfo.mintick * 10
+minBreakValue = minBreakPips * pipValue
+snrToleranceValue = snrTolerancePips * pipValue
+
+//=========================
+// BODY HIGH LOW
+//=========================
+bodyHigh = math.max(open, close)
+bodyLow  = math.min(open, close)
+
+//=========================
+// PIVOT DETECTION ONLY
+//=========================
+ph = ta.pivothigh(bodyHigh, pivotLen, pivotLen)
+pl = ta.pivotlow(bodyLow, pivotLen, pivotLen)
+
+var float lastResistance = na
+var int   lastResistanceBar = na
+
+var float lastSupport = na
+var int   lastSupportBar = na
+
+if not na(ph)
+    lastResistance := ph
+    lastResistanceBar := bar_index - pivotLen
+
+if not na(pl)
+    lastSupport := pl
+    lastSupportBar := bar_index - pivotLen
+
+//=========================
+// BREAKOUT LOGIC
+//=========================
+bodyBreakAboveResistance =
+     not na(lastResistance) and
+     open <= lastResistance and
+     close > lastResistance
+
+bodyBreakBelowSupport =
+     not na(lastSupport) and
+     open >= lastSupport and
+     close < lastSupport
+
+breakAboveResistance =
+     useCloseBreak ?
+     bodyBreakAboveResistance :
+     not na(lastResistance) and high > lastResistance
+
+breakBelowSupport =
+     useCloseBreak ?
+     bodyBreakBelowSupport :
+     not na(lastSupport) and low < lastSupport
+
+//=========================
+// STRONG BREAK
+//=========================
+breakCandleUp =
+     not na(lastResistance) and
+     (close - lastResistance) >= minBreakValue
+
+breakCandleDown =
+     not na(lastSupport) and
+     (lastSupport - close) >= minBreakValue
+
+validBreakUp   = breakAboveResistance and breakCandleUp
+validBreakDown = breakBelowSupport and breakCandleDown
+
+//=========================
+// STORE ACTIVE RBS / SBR
+//=========================
+var float activeRBS = na
+var float activeSBR = na
+
+var float lastProcessedRBS = na
+var float lastProcessedSBR = na
+
+newRBS =
+     validBreakUp and
+     trendBuyOK and
+     (na(lastProcessedRBS) or lastProcessedRBS != lastResistance)
+
+newSBR =
+     validBreakDown and
+     trendSellOK and
+     (na(lastProcessedSBR) or lastProcessedSBR != lastSupport)
+
+//=========================
+// DRAW RBS / SBR LINES
+//=========================
+if newRBS
+    activeRBS := lastResistance
+    lastProcessedRBS := lastResistance
+
+    if showSBRRBSLines
+        line.new(
+             lastResistanceBar,
+             activeRBS,
+             bar_index + lineExtendBars,
+             activeRBS,
+             color=color.lime,
+             width=2)
+
+if newSBR
+    activeSBR := lastSupport
+    lastProcessedSBR := lastSupport
+
+    if showSBRRBSLines
+        line.new(
+             lastSupportBar,
+             activeSBR,
+             bar_index + lineExtendBars,
+             activeSBR,
+             color=color.red,
+             width=2)
+
+//=========================
+// PRICE NEAR RBS / SBR
+//=========================
+nearRBS =
+     not na(activeRBS) and
+     math.abs(close - activeRBS) <= snrToleranceValue
+
+nearSBR =
+     not na(activeSBR) and
+     math.abs(close - activeSBR) <= snrToleranceValue
+
+buyZoneOK =
+     not useSNRFilter or nearRBS
+
+sellZoneOK =
+     not useSNRFilter or nearSBR
+
+//==========================
+// CANDLE FUNCTIONS
+//==========================
+isBull(i) =>
+    close[i] > open[i]
+
+isBear(i) =>
+    close[i] < open[i]
+
+//==========================
+// 1st Setting
+// 1 Biru 3 Merah 2 Biru
+//==========================
+buySet1 =
+     isBull(5) and
+     isBear(4) and
+     isBear(3) and
+     isBear(2) and
+     isBull(1) and
+     isBull(0)
+
+sellSet1 =
+     isBear(5) and
+     isBull(4) and
+     isBull(3) and
+     isBull(2) and
+     isBear(1) and
+     isBear(0)
+
+//==========================
+// 2nd Setting
+// 4 Merah 1 Biru
+//==========================
+buySet2 =
+     isBear(4) and
+     isBear(3) and
+     isBear(2) and
+     isBear(1) and
+     isBull(0)
+
+sellSet2 =
+     isBull(4) and
+     isBull(3) and
+     isBull(2) and
+     isBull(1) and
+     isBear(0)
+
+//==========================
+// 3rd Setting
+// 2 Merah / 2 Biru
+//==========================
+firstBearNoEngulf =
+     isBear(1) and
+     isBear(0) and
+     not (high[1] > high[0] and low[1] < low[0])
+
+buyBreak =
+     firstBearNoEngulf[1] and
+     close > high[1]
+
+firstBullNoEngulf =
+     isBull(1) and
+     isBull(0) and
+     not (high[1] < high[0] and low[1] > low[0])
+
+sellBreak =
+     firstBullNoEngulf[1] and
+     close < low[1]
+
+//==========================
+// FINAL SIGNAL
+//==========================
+buySet1Final =
+     buySet1 and buyZoneOK and trendBuyOK
+
+buySet2Final =
+     buySet2 and buyZoneOK and trendBuyOK
+
+buyBreakFinal =
+     buyBreak and buyZoneOK and trendBuyOK
+
+sellSet1Final =
+     sellSet1 and sellZoneOK and trendSellOK
+
+sellSet2Final =
+     sellSet2 and sellZoneOK and trendSellOK
+
+sellBreakFinal =
+     sellBreak and sellZoneOK and trendSellOK
+
+//==========================
+// SIGNAL ON NEW BAR OPEN
+// Signal keluar pada candle baru
+// Based on signal candle sebelumnya
+//==========================
+buySet1Open =
+     barstate.isnew and buySet1Final[1]
+
+buySet2Open =
+     barstate.isnew and buySet2Final[1]
+
+buyBreakOpen =
+     barstate.isnew and buyBreakFinal[1]
+
+sellSet1Open =
+     barstate.isnew and sellSet1Final[1]
+
+sellSet2Open =
+     barstate.isnew and sellSet2Final[1]
+
+sellBreakOpen =
+     barstate.isnew and sellBreakFinal[1]
+
+//==========================
+// PLOT BUY SIGNALS
+//==========================
+plotshape(
+     buySet1Open,
+     title="BUY SET 1",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.lime,
+     text="BUY\n1st",
+     textcolor=color.black,
+     size=size.small)
+
+plotshape(
+     buySet2Open,
+     title="BUY SET 2",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.aqua,
+     text="BUY\n2nd",
+     textcolor=color.black,
+     size=size.small)
+
+plotshape(
+     buyBreakOpen,
+     title="BUY SET 3",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.yellow,
+     text="BUY\n3rd",
+     textcolor=color.black,
+     size=size.small)
+
+//==========================
+// PLOT SELL SIGNALS
+//==========================
+plotshape(
+     sellSet1Open,
+     title="SELL SET 1",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.red,
+     text="SELL\n1st",
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(
+     sellSet2Open,
+     title="SELL SET 2",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.orange,
+     text="SELL\n2nd",
+     textcolor=color.white,
+     size=size.small)
+
+plotshape(
+     sellBreakOpen,
+     title="SELL SET 3",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.fuchsia,
+     text="SELL\n3rd",
+     textcolor=color.white,
+     size=size.small)
+
+//==========================
+// ANY SIGNAL
+//==========================
+anyBuySignal =
+     buySet1Open or
+     buySet2Open or
+     buyBreakOpen
+
+anySellSignal =
+     sellSet1Open or
+     sellSet2Open or
+     sellBreakOpen
+
+anySignal =
+     anyBuySignal or
+     anySellSignal
+
+//==========================
+// ALERT FUNCTION
+// TradingView:
+// Condition pilih "Any alert() function call"
+// Options pilih "Once Per Bar"
+//==========================
+if enableAlerts and buySet1Open
+    alert("BUY 1st Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+if enableAlerts and buySet2Open
+    alert("BUY 2nd Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+if enableAlerts and buyBreakOpen
+    alert("BUY 3rd Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+if enableAlerts and sellSet1Open
+    alert("SELL 1st Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+if enableAlerts and sellSet2Open
+    alert("SELL 2nd Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+if enableAlerts and sellBreakOpen
+    alert("SELL 3rd Setting | " + syminfo.ticker + " | TF: " + timeframe.period + " | New bar open", alert.freq_once_per_bar)
+
+//==========================
+// ALERT CONDITIONS
+//==========================
+alertcondition(anySignal, title="ANY BUY SELL SIGNAL - BAR OPEN", message="ANY BUY SELL SIGNAL - BAR OPEN")
+alertcondition(anyBuySignal, title="ANY BUY SIGNAL - BAR OPEN", message="ANY BUY SIGNAL - BAR OPEN")
+alertcondition(anySellSignal, title="ANY SELL SIGNAL - BAR OPEN", message="ANY SELL SIGNAL - BAR OPEN")
+
+alertcondition(buySet1Open, title="BUY 1st Setting - BAR OPEN", message="BUY - 1st Setting at new bar open")
+alertcondition(buySet2Open, title="BUY 2nd Setting - BAR OPEN", message="BUY - 2nd Setting at new bar open")
+alertcondition(buyBreakOpen, title="BUY 3rd Setting - BAR OPEN", message="BUY - 3rd Setting at new bar open")
+
+alertcondition(sellSet1Open, title="SELL 1st Setting - BAR OPEN", message="SELL - 1st Setting at new bar open")
+alertcondition(sellSet2Open, title="SELL 2nd Setting - BAR OPEN", message="SELL - 2nd Setting at new bar open")
+alertcondition(sellBreakOpen, title="SELL 3rd Setting - BAR OPEN", message="SELL - 3rd Setting at new bar open")

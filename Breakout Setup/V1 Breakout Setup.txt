@@ -1,0 +1,194 @@
+//@version=5
+indicator("Breakout After Sideways | Buy & Sell Setup", overlay=true, max_lines_count=500, max_labels_count=500)
+
+//=========================
+// INPUT
+//=========================
+// Sideways Detection
+sidewaysLen       = input.int(20, "Sideways Lookback Bars", minval=5, maxval=100)
+sidewaysThreshold = input.float(30, "Max Sideways Range (pips)", step=1.0)
+minSidewaysBars   = input.int(10, "Min Bars In Sideways", minval=5)
+
+// Breakout Confirmation
+breakoutBuffer    = input.float(3, "Breakout Buffer (pips)", step=0.1)
+useVolumeFilter   = input.bool(false, "Use Volume Breakout Filter")
+volMultiplier     = input.float(1.5, "Volume Multiplier For Breakout", step=0.1)
+
+// EMA Trend Filter
+useTrendFilter    = input.bool(false, "Use EMA Trend Filter")
+emaLen            = input.int(50, "EMA Length", minval=1)
+showEMA           = input.bool(true, "Show EMA Line")
+
+// Alerts
+enableAlerts      = input.bool(true, "Enable Alerts")
+
+// Visual
+boxColor          = input.color(color.new(color.gray, 80), "Sideways Box Color")
+showBox           = input.bool(true, "Show Sideways Box")
+
+//=========================
+// PIP VALUE
+//=========================
+pipValue = syminfo.mintick * 10
+sidewaysRangeValue = sidewaysThreshold * pipValue
+breakoutBufferValue = breakoutBuffer * pipValue
+
+//=========================
+// EMA TREND FILTER
+//=========================
+emaValue = ta.ema(close, emaLen)
+
+plot(
+     showEMA ? emaValue : na,
+     title="EMA Trend Filter",
+     color=color.yellow,
+     linewidth=2)
+
+trendBuyOK = not useTrendFilter or close > emaValue
+trendSellOK = not useTrendFilter or close < emaValue
+
+//=========================
+// VOLUME FILTER
+//=========================
+avgVol = ta.sma(volume, 20)
+volumeOK = not useVolumeFilter or (volume > avgVol * volMultiplier)
+
+//=========================
+// SIDEWAYS DETECTION
+// Detect consolidation zone:
+// Highest high - Lowest low within lookback <= threshold
+//=========================
+highestInRange = ta.highest(high, sidewaysLen)
+lowestInRange  = ta.lowest(low, sidewaysLen)
+rangeSize      = highestInRange - lowestInRange
+
+// Check if market is in sideways (range kecil)
+isSideways = rangeSize <= sidewaysRangeValue
+
+// Count berapa bar dah sideways
+var int sidewaysCount = 0
+
+if isSideways
+    sidewaysCount := sidewaysCount + 1
+else
+    sidewaysCount := 0
+
+// Sideways confirmed bila cukup minimum bars
+sidewaysConfirmed = sidewaysCount >= minSidewaysBars
+
+//=========================
+// STORE SIDEWAYS ZONE HIGH/LOW
+//=========================
+var float sidewaysHigh = na
+var float sidewaysLow = na
+var int sidewaysStartBar = na
+var bool wasInSideways = false
+
+if sidewaysConfirmed
+    sidewaysHigh := highestInRange
+    sidewaysLow := lowestInRange
+    if not wasInSideways
+        sidewaysStartBar := bar_index - sidewaysLen
+    wasInSideways := true
+
+//=========================
+// BREAKOUT DETECTION
+// Breakout berlaku bila:
+// - Sebelum ni dalam sideways (wasInSideways = true)
+// - Sekarang price break atas/bawah sideways zone
+//=========================
+breakoutUp = 
+     wasInSideways and
+     not na(sidewaysHigh) and
+     close > sidewaysHigh + breakoutBufferValue and
+     volumeOK
+
+breakoutDown = 
+     wasInSideways and
+     not na(sidewaysLow) and
+     close < sidewaysLow - breakoutBufferValue and
+     volumeOK
+
+// Reset sideways state selepas breakout
+if breakoutUp or breakoutDown
+    wasInSideways := false
+    sidewaysCount := 0
+
+//=========================
+// SIGNAL WITH TREND FILTER
+//=========================
+buySignal = breakoutUp and trendBuyOK
+sellSignal = breakoutDown and trendSellOK
+
+//=========================
+// DRAW SIDEWAYS BOX
+//=========================
+var box sidewaysBox = na
+
+if showBox and sidewaysConfirmed and barstate.islast
+    if not na(sidewaysBox)
+        box.delete(sidewaysBox)
+    sidewaysBox := box.new(
+         sidewaysStartBar,
+         sidewaysHigh,
+         bar_index,
+         sidewaysLow,
+         border_color=color.gray,
+         bgcolor=boxColor,
+         border_width=1)
+
+//=========================
+// PLOT SIGNALS
+//=========================
+plotshape(
+     buySignal,
+     title="BUY Breakout",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=color.lime,
+     text="BUY |\nBreakout Up",
+     textcolor=color.black,
+     size=size.small)
+
+plotshape(
+     sellSignal,
+     title="SELL Breakout",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=color.red,
+     text="SELL |\nBreakout Down",
+     textcolor=color.white,
+     size=size.small)
+
+//=========================
+// PLOT SIDEWAYS ZONE LINES
+//=========================
+plot(
+     sidewaysConfirmed ? sidewaysHigh : na,
+     title="Sideways High",
+     color=color.new(color.green, 50),
+     linewidth=1,
+     style=plot.style_circles)
+
+plot(
+     sidewaysConfirmed ? sidewaysLow : na,
+     title="Sideways Low",
+     color=color.new(color.red, 50),
+     linewidth=1,
+     style=plot.style_circles)
+
+//=========================
+// ALERTS
+//=========================
+if enableAlerts and buySignal
+    alert("BUY | Breakout Up After Sideways | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+if enableAlerts and sellSignal
+    alert("SELL | Breakout Down After Sideways | " + syminfo.ticker + " | TF: " + timeframe.period, alert.freq_once_per_bar)
+
+//=========================
+// ALERT CONDITIONS
+//=========================
+alertcondition(buySignal, title="BUY Breakout After Sideways", message="BUY | Breakout Up After Sideways")
+alertcondition(sellSignal, title="SELL Breakout After Sideways", message="SELL | Breakout Down After Sideways")
+alertcondition(buySignal or sellSignal, title="ANY Breakout Signal", message="Breakout After Sideways Detected")
