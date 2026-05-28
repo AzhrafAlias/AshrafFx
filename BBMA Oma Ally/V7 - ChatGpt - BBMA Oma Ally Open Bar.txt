@@ -1,5 +1,5 @@
 //@version=5
-indicator("BBMA OMA Ally - TF1 RE + Tight Extreme", overlay=true, max_labels_count=500)
+indicator("BBMA OMA Ally", overlay=true, max_labels_count=500)
 
 //====================================================
 // 0) Helper: symbol detection
@@ -190,8 +190,6 @@ plotshape(showDebug and newExtremeSell and not extremeSellType3 and extremeSellT
 // Trigger immediately when signal appears (no bar close wait)
 // Anti-spam: edge trigger + hard max 1 alert per bar
 //====================================================
-fmt(x) => str.tostring(x, format.mintick)
-
 reBuyNow = alertRE and reBuyRaw and not nz(reBuyRaw[1], false)
 reSellNow = alertRE and reSellRaw and not nz(reSellRaw[1], false)
 extremeBuyNow = alertExtreme and extremeBuyRaw and not nz(extremeBuyRaw[1], false)
@@ -206,8 +204,7 @@ signalText := reSellNow ? (signalText == "" ? "RE SELL" : signalText + " + RE SE
 signalText := extremeBuyNow ? (signalText == "" ? "EXTREME BUY" : signalText + " + EXTREME BUY") : signalText
 signalText := extremeSellNow ? (signalText == "" ? "EXTREME SELL" : signalText + " + EXTREME SELL") : signalText
 
-signalSource = signalText != "" ? "TF1 RE/EXTREME" : ""
-alertMsg = signalText != "" ? signalText + " | " + signalSource + " | " + syminfo.ticker + " " + timeframe.period + " | close=" + fmt(close) : ""
+alertMsg = signalText != "" ? signalText + " | TF: " + timeframe.period + " | " + syminfo.ticker : ""
 
 if sendAlerts and canAlertThisBar and alertMsg != ""
     alert(alertMsg, alert.freq_once_per_bar)
