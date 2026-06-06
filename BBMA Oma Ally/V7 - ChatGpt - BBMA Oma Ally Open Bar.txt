@@ -1,57 +1,44 @@
-//@version=5
+//@version=6
 indicator("BBMA OMA Ally", overlay=true, max_labels_count=500)
-
-//====================================================
-// 0) Helper: symbol detection
-//====================================================
-sym = str.upper(syminfo.ticker)
-isGOLD = str.contains(sym, "GOLD") or str.contains(sym, "XAU")
-isGJ = str.contains(sym, "GBPJPY") or (str.contains(sym, "GBP") and str.contains(sym, "JPY"))
-isGU = str.contains(sym, "GBPUSD") or (str.contains(sym, "GBP") and str.contains(sym, "USD"))
-isGA = str.contains(sym, "GBPAUD") or (str.contains(sym, "GBP") and str.contains(sym, "AUD"))
-isEJ = str.contains(sym, "EURJPY") or (str.contains(sym, "EUR") and str.contains(sym, "JPY"))
 
 //====================================================
 // 1) Inputs
 //====================================================
-useAutoProfile = input.bool(true, "Auto-switch settings by symbol (recommended)")
 bbLen = input.int(20, "BB Period", minval=5)
 bbDev = input.float(2.0, "BB Deviation", minval=0.5, step=0.1)
 atrLen = input.int(14, "ATR Length", minval=5)
 
-useH1FilterTF = input.bool(true, "Use H1 Filter for TF / RE")
+useH1FilterTF = input.bool(false, "Use H1 Filter for TF / REENTRY")
 useBarCloseConfirm = input.bool(false, "Confirm on bar close (OFF = faster alert)")
 
-reLookbackBars = input.int(10, "REENTRY: Momentum lookback bars", minval=1)
-reBlockWhenBBFlat = input.bool(true, "REENTRY: Block when BB flat (recommended)")
-reUseMA = input.string("MA10", "REENTRY: Touch MA", options=["MA5", "MA10"])
+reentryLookbackBars = input.int(10, "REENTRY: Momentum lookback bars", minval=1)
+reentryUseMASetting = input.string("MA10", "REENTRY: Touch MA")
 
-flatLookbackBars_manual = input.int(20, "BB Flat (manual): width avg lookback", minval=5)
-flatSlopeATR_manual = input.float(0.30, "BB Flat (manual): MidBB slope per bar <= ATR*x", minval=0.01, step=0.01)
-flatWidthATR_manual = input.float(3.0, "BB Flat (manual): Bandwidth <= ATR*x", minval=0.1, step=0.1)
+flatLookbackBars = input.int(20, "BB Flat: width avg lookback", minval=5)
+flatSlopeATR = input.float(0.40, "BB Flat: MidBB slope per bar <= ATR*x", minval=0.01, step=0.01)
+flatWidthATR = input.float(4.5, "BB Flat: Bandwidth <= ATR*x", minval=0.1, step=0.1)
 useWidthStable = input.bool(true, "BB Flat: require width not expanding fast")
-widthStablePct_manual = input.float(1.15, "BB Flat (manual): width <= avgWidth * factor", minval=1.0, step=0.05)
+widthStablePct = input.float(1.20, "BB Flat: width <= avgWidth * factor", minval=1.0, step=0.05)
 
-showReSignals = input.bool(true, "Show RE BUY / RE SELL")
+// EXTREME Settings
+extremeLookbackBars = input.int(10, "EXTREME: Lookback bars for reversal check", minval=3, group="EXTREME Settings")
+
+// CSA Settings
+enableCSA = input.bool(true, "Enable CSA (Candle Arah Kukuh)", group="CSA Settings")
+showCSASignals = input.bool(true, "Show CSA BUY / CSA SELL", group="CSA Settings")
+
+showReentrySignals = input.bool(true, "Show REENTRY BUY / REENTRY SELL")
 showExtremeSignals = input.bool(true, "Show EXTREME BUY / EXTREME SELL")
 showDebug = input.bool(false, "Show debug marks")
 
 sendAlerts = input.bool(true, "Send alerts via alert()")
-alertRE = input.bool(true, "Alert RE BUY / RE SELL")
+alertReentry = input.bool(true, "Alert REENTRY BUY / REENTRY SELL")
 alertExtreme = input.bool(true, "Alert EXTREME BUY / EXTREME SELL")
 
 //====================================================
-// 2) Auto profile table
+// 2) Pip Value Calculation
 //====================================================
-flatSlopeATR_auto = isGOLD ? 0.40 : isGJ ? 0.40 : isGU ? 0.30 : isGA ? 0.25 : isEJ ? 0.35 : 0.30
-flatWidthATR_auto = isGOLD ? 4.5 : isGJ ? 4.0 : isGU ? 3.0 : isGA ? 2.6 : isEJ ? 3.5 : 3.0
-widthStablePct_auto = isGOLD ? 1.20 : isGJ ? 1.20 : isGU ? 1.15 : isGA ? 1.12 : isEJ ? 1.18 : 1.15
-flatLookbackBars_auto = 20
-
-flatLookbackBars = useAutoProfile ? flatLookbackBars_auto : flatLookbackBars_manual
-flatSlopeATR = useAutoProfile ? flatSlopeATR_auto : flatSlopeATR_manual
-flatWidthATR = useAutoProfile ? flatWidthATR_auto : flatWidthATR_manual
-widthStablePct = useAutoProfile ? widthStablePct_auto : widthStablePct_manual
+pipValue = syminfo.mintick * 10
 
 //====================================================
 // 3) Indicators
@@ -68,7 +55,7 @@ ma10L = ta.wma(low, 10)
 atr = ta.atr(atrLen)
 
 //====================================================
-// 4) H1 filter (for TF / RE only)
+// 4) H1 filter (for TF / REENTRY only)
 //====================================================
 h1Close = request.security(syminfo.tickerid, "60", close)
 h1EMA50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
@@ -96,71 +83,154 @@ bodyHigh = math.max(open, close)
 bodyLow = math.min(open, close)
 
 //====================================================
-// 7) TF1 Momentum logic (follow old script)
+// 7) TF1 Momentum logic
 //====================================================
 tfMomBuy = allowBuyTF and close > upper and isBull
 tfMomSell = allowSellTF and close < lower and isBear
 
-//====================================================
-// 8) TF1 Reentry logic (follow old script + EMA50 filter)
-//====================================================
-reMA_L = reUseMA == "MA5" ? ma5L : ma10L
-reMA_H = reUseMA == "MA5" ? ma5H : ma10H
-momBuyRecent = ta.barssince(tfMomBuy) > 0 and ta.barssince(tfMomBuy) <= reLookbackBars
-momSellRecent = ta.barssince(tfMomSell) > 0 and ta.barssince(tfMomSell) <= reLookbackBars
-reAllowed = not reBlockWhenBBFlat or not bbFlat
-reBuyRaw = allowBuyTF and reAllowed and momBuyRecent and low <= reMA_L and close > reMA_L and isBull and close > ema50
-reSellRaw = allowSellTF and reAllowed and momSellRecent and high >= reMA_H and close < reMA_H and isBear and close < ema50
-reBuy = useBarCloseConfirm ? (reBuyRaw and barstate.isconfirmed) : reBuyRaw
-reSell = useBarCloseConfirm ? (reSellRaw and barstate.isconfirmed) : reSellRaw
-newReBuy = reBuy and not reBuy[1]
-newReSell = reSell and not reSell[1]
+recentMomBuy = ta.barssince(tfMomBuy) <= extremeLookbackBars
+recentMomSell = ta.barssince(tfMomSell) <= extremeLookbackBars
 
 //====================================================
-// 9) Tight Extreme logic
-// Extreme Sell:
-// - shadow cucuk Top BB
-// - shadow cucuk WMA5 High
-// - optional cucuk EMA50
-// - WMA5 High mesti di luar BB
-// - wick only outside BB
-//
-// Extreme Buy:
-// - shadow cucuk Bottom BB
-// - shadow cucuk WMA5 Low
-// - optional cucuk EMA50
-// - WMA5 Low mesti di luar BB
-// - wick only outside BB
+// 8) LATEST DIRECTION TRACKER
 //====================================================
-touchTopBB = high >= upper
-touchBottomBB = low <= lower
+var string lastDirection = na
+var int lastDirectionBar = na
+var string lastCSADir = na
+var int lastCSABar = na
 
-touchWma5High = high >= ma5H
-touchWma5Low = low <= ma5L
-touchEma50FromTop = high >= ema50
-touchEma50FromBottom = low <= ema50
+csaLocked = not na(lastCSADir) and not na(lastCSABar) and (bar_index - lastCSABar) <= reentryLookbackBars
 
-wma5HighOutsideBB = ma5H > upper
-wma5LowOutsideBB = ma5L < lower
+if tfMomBuy
+    if not (csaLocked and lastCSADir == "SELL")
+        lastDirection := "BUY"
+        lastDirectionBar := bar_index
 
-wickOnlyExtremeSell = touchTopBB and bodyHigh <= upper and close <= upper
-wickOnlyExtremeBuy = touchBottomBB and bodyLow >= lower and close >= lower
+if tfMomSell
+    if not (csaLocked and lastCSADir == "BUY")
+        lastDirection := "SELL"
+        lastDirectionBar := bar_index
 
-extremeSellType3 = wickOnlyExtremeSell and touchWma5High and touchEma50FromTop and wma5HighOutsideBB
-extremeSellType2 = wickOnlyExtremeSell and touchWma5High and wma5HighOutsideBB
-extremeBuyType3 = wickOnlyExtremeBuy and touchWma5Low and touchEma50FromBottom and wma5LowOutsideBB
-extremeBuyType2 = wickOnlyExtremeBuy and touchWma5Low and wma5LowOutsideBB
+if csaLocked
+    lastDirection := lastCSADir
+    lastDirectionBar := lastCSABar
 
-extremeSellRaw = extremeSellType3 or extremeSellType2
-extremeBuyRaw = extremeBuyType3 or extremeBuyType2
+//====================================================
+// 9) CSA Detection
+//====================================================
+csaBuyRaw = enableCSA and isBull and close > ma5H and close > ma10H
+csaSellRaw = enableCSA and isBear and close < ma5L and close < ma10L
 
-extremeSell = useBarCloseConfirm ? (extremeSellRaw and barstate.isconfirmed) : extremeSellRaw
-extremeBuy = useBarCloseConfirm ? (extremeBuyRaw and barstate.isconfirmed) : extremeBuyRaw
+if csaBuyRaw
+    lastDirection := "BUY"
+    lastDirectionBar := bar_index
+    lastCSADir := "BUY"
+    lastCSABar := bar_index
+
+if csaSellRaw
+    lastDirection := "SELL"
+    lastDirectionBar := bar_index
+    lastCSADir := "SELL"
+    lastCSABar := bar_index
+
+hasRecentSignal = not na(lastDirection) and (bar_index - lastDirectionBar) <= reentryLookbackBars
+waitingForReentryBuy = hasRecentSignal and lastDirection == "BUY"
+waitingForReentrySell = hasRecentSignal and lastDirection == "SELL"
+
+// show CSA only if not duplicate
+var float lastCSABuyLevel = na
+var float lastCSASellLevel = na
+
+csaBuy = csaBuyRaw and (na(lastCSABuyLevel) or math.abs(close - lastCSABuyLevel) > pipValue * 10)
+csaSell = csaSellRaw and (na(lastCSASellLevel) or math.abs(close - lastCSASellLevel) > pipValue * 10)
+
+if csaBuy
+    lastCSABuyLevel := close
+
+if csaSell
+    lastCSASellLevel := close
+
+//====================================================
+// 10) REENTRY LOGIC
+// Rule requested:
+// - REENTRY BUY: shadow touch BOTH ma5L & ma10L (bullish/bearish tak kisah)
+// - REENTRY SELL: shadow touch BOTH ma5H & ma10H (bullish/bearish tak kisah)
+//====================================================
+reentryBuyCondition1 = allowBuyTF
+reentryBuyCondition2 = waitingForReentryBuy and not (csaLocked and lastCSADir == "SELL")
+reentryBuyCondition3 = low <= ma5L
+reentryBuyCondition4 = low <= ma10L
+reentryBuyRaw = reentryBuyCondition1 and reentryBuyCondition2 and reentryBuyCondition3 and reentryBuyCondition4
+
+reentrySellCondition1 = allowSellTF
+reentrySellCondition2 = waitingForReentrySell and not (csaLocked and lastCSADir == "BUY")
+reentrySellCondition3 = high >= ma5H
+reentrySellCondition4 = high >= ma10H
+reentrySellRaw = reentrySellCondition1 and reentrySellCondition2 and reentrySellCondition3 and reentrySellCondition4
+
+// realtime (no wait bar close)
+reentryBuy = reentryBuyRaw
+reentrySell = reentrySellRaw
+
+newReentryBuy = reentryBuy and not reentryBuy[1]
+newReentrySell = reentrySell and not reentrySell[1]
+
+// reset after matched reentry
+if newReentryBuy or newReentrySell
+    lastDirection := na
+    lastDirectionBar := na
+
+if newReentryBuy and lastCSADir == "BUY"
+    lastCSADir := na
+    lastCSABar := na
+
+if newReentrySell and lastCSADir == "SELL"
+    lastCSADir := na
+    lastCSABar := na
+
+//====================================================
+// 11) EXTREME LOGIC (RELAXED)
+// Keep old strict conditions + add wick-only fast path
+//====================================================
+ma5OutsideTop = ma5H > upper
+ma5OutsideBottom = ma5L < lower
+
+closeInsideBBForBuy = close >= lower and close <= upper
+closeInsideBBForSell = close >= lower and close <= upper
+
+wickTouchBottomBB = low <= lower and bodyLow >= lower and closeInsideBBForBuy
+wickTouchTopBB = high >= upper and bodyHigh <= upper and closeInsideBBForSell
+
+reversalBullish = isBull and low < low[1] and close > close[1]
+reversalBearish = isBear and high > high[1] and close < close[1]
+
+noRecentMomBuy = not recentMomBuy
+noRecentMomSell = not recentMomSell
+
+retestMA5Low = low <= ma5L and close >= ma5L
+retestMA5High = high >= ma5H and close <= ma5H
+
+// Old strict conditions (KEKAL)
+extremeBuyStrict = ma5OutsideBottom and wickTouchBottomBB and reversalBullish and noRecentMomBuy and retestMA5Low
+extremeSellStrict = ma5OutsideTop and wickTouchTopBB and reversalBearish and noRecentMomSell and retestMA5High
+
+// New relaxed fast-path (as requested)
+// Wick cucuk BB + body/close dalam BB = terus valid
+extremeBuyFast = wickTouchBottomBB
+extremeSellFast = wickTouchTopBB
+
+extremeBuyRaw = extremeBuyStrict or extremeBuyFast
+extremeSellRaw = extremeSellStrict or extremeSellFast
+
+// EXTREME must wait bar close
+extremeSell = extremeSellRaw and barstate.isconfirmed
+extremeBuy = extremeBuyRaw and barstate.isconfirmed
+
 newExtremeSell = extremeSell and not extremeSell[1]
 newExtremeBuy = extremeBuy and not extremeBuy[1]
 
 //====================================================
-// 10) Plots
+// 12) Plots
 //====================================================
 plot(upper, "BB Upper", color=color.new(color.black, 0))
 plot(midBB, "BB Mid", color=color.new(color.gray, 0))
@@ -169,43 +239,47 @@ plot(ema50, "EMA50", color=color.new(color.lime, 0))
 plot(ma5H, "WMA5 High", color=color.new(color.blue, 0))
 plot(ma10H, "WMA10 High", color=color.new(color.yellow, 0))
 plot(ma5L, "WMA5 Low", color=color.new(color.fuchsia, 0))
-plot(ma10L, "WMA10 Low", color=color.new(color.white, 0))
+plot(ma10L, "WMA10 Low", color=color.new(#e21f1f, 0))
 
-plotshape(showReSignals and newReBuy, title="RE BUY", style=shape.labelup, location=location.belowbar, text="RE BUY", textcolor=color.white, color=color.new(color.green, 0), size=size.small)
-plotshape(showReSignals and newReSell, title="RE SELL", style=shape.labeldown, location=location.abovebar, text="RE SELL", textcolor=color.white, color=color.new(color.red, 0), size=size.small)
+plotshape(showCSASignals and csaBuy, title="CSA BUY", style=shape.triangleup, location=location.belowbar, text="CSA BUY", textcolor=color.white, color=color.new(color.aqua, 0), size=size.normal)
+plotshape(showCSASignals and csaSell, title="CSA SELL", style=shape.triangledown, location=location.abovebar, text="CSA SELL", textcolor=color.white, color=color.new(color.orange, 0), size=size.normal)
+
+plotshape(showReentrySignals and newReentryBuy, title="REENTRY BUY", style=shape.labelup, location=location.belowbar, text="REENTRY BUY", textcolor=color.white, color=color.new(color.green, 0), size=size.small)
+plotshape(showReentrySignals and newReentrySell, title="REENTRY SELL", style=shape.labeldown, location=location.abovebar, text="REENTRY SELL", textcolor=color.white, color=color.new(color.red, 0), size=size.small)
 
 plotshape(showExtremeSignals and newExtremeBuy, title="EXTREME BUY", style=shape.labelup, location=location.belowbar, text="EXTREME BUY", textcolor=color.white, color=color.new(color.green, 0), size=size.small)
 plotshape(showExtremeSignals and newExtremeSell, title="EXTREME SELL", style=shape.labeldown, location=location.abovebar, text="EXTREME SELL", textcolor=color.white, color=color.new(color.red, 0), size=size.small)
 
-plotshape(showDebug and tfMomBuy, title="Momentum Buy Debug", style=shape.circle, location=location.belowbar, text="MOM", textcolor=color.white, color=color.new(color.green, 70), size=size.tiny)
-plotshape(showDebug and tfMomSell, title="Momentum Sell Debug", style=shape.circle, location=location.abovebar, text="MOM", textcolor=color.white, color=color.new(color.red, 70), size=size.tiny)
-plotshape(showDebug and newExtremeBuy and extremeBuyType3, title="Extreme Buy Type 3 Debug", style=shape.circle, location=location.belowbar, text="B3", textcolor=color.white, color=color.new(color.green, 75), size=size.tiny)
-plotshape(showDebug and newExtremeBuy and not extremeBuyType3 and extremeBuyType2, title="Extreme Buy Type 2 Debug", style=shape.circle, location=location.belowbar, text="B2", textcolor=color.white, color=color.new(color.green, 85), size=size.tiny)
-plotshape(showDebug and newExtremeSell and extremeSellType3, title="Extreme Sell Type 3 Debug", style=shape.circle, location=location.abovebar, text="S3", textcolor=color.white, color=color.new(color.red, 75), size=size.tiny)
-plotshape(showDebug and newExtremeSell and not extremeSellType3 and extremeSellType2, title="Extreme Sell Type 2 Debug", style=shape.circle, location=location.abovebar, text="S2", textcolor=color.white, color=color.new(color.red, 85), size=size.tiny)
+plotshape(showDebug and tfMomBuy, title="Momentum Buy", style=shape.circle, location=location.belowbar, text="MOM", textcolor=color.white, color=color.new(color.green, 70), size=size.tiny)
+plotshape(showDebug and tfMomSell, title="Momentum Sell", style=shape.circle, location=location.abovebar, text="MOM", textcolor=color.white, color=color.new(color.red, 70), size=size.tiny)
+plotshape(showDebug and waitingForReentryBuy, title="Wait Buy", style=shape.square, location=location.bottom, text="→BUY", textcolor=color.green, color=color.new(color.green, 80), size=size.tiny)
+plotshape(showDebug and waitingForReentrySell, title="Wait Sell", style=shape.square, location=location.top, text="→SELL", textcolor=color.red, color=color.new(color.red, 80), size=size.tiny)
 
 //====================================================
-// 11) Single Any alert() function call
-// RE + EXTREME
-// Trigger immediately when signal appears (no bar close wait)
-// Anti-spam: edge trigger + hard max 1 alert per bar
+// 13) Alerts
 //====================================================
-reBuyNow = alertRE and reBuyRaw and not nz(reBuyRaw[1], false)
-reSellNow = alertRE and reSellRaw and not nz(reSellRaw[1], false)
-extremeBuyNow = alertExtreme and extremeBuyRaw and not nz(extremeBuyRaw[1], false)
-extremeSellNow = alertExtreme and extremeSellRaw and not nz(extremeSellRaw[1], false)
+isLowTF = timeframe.period == "1" or timeframe.period == "5"
 
-var int lastAlertBar = na
-canAlertThisBar = na(lastAlertBar) or bar_index > lastAlertBar
+reentryBuyNow = alertReentry and newReentryBuy and not isLowTF
+reentrySellNow = alertReentry and newReentrySell and not isLowTF
+extremeBuyNow = alertExtreme and newExtremeBuy
+extremeSellNow = alertExtreme and newExtremeSell
 
 signalText = ""
-signalText := reBuyNow ? (signalText == "" ? "RE BUY" : signalText + " + RE BUY") : signalText
-signalText := reSellNow ? (signalText == "" ? "RE SELL" : signalText + " + RE SELL") : signalText
+signalText := reentryBuyNow ? (signalText == "" ? "REENTRY BUY" : signalText + " + REENTRY BUY") : signalText
+signalText := reentrySellNow ? (signalText == "" ? "REENTRY SELL" : signalText + " + REENTRY SELL") : signalText
 signalText := extremeBuyNow ? (signalText == "" ? "EXTREME BUY" : signalText + " + EXTREME BUY") : signalText
 signalText := extremeSellNow ? (signalText == "" ? "EXTREME SELL" : signalText + " + EXTREME SELL") : signalText
+
+var int lastAlertBar = na
+var string lastAlertType = ""
+
+currentSignal = signalText
+canAlertThisBar = signalText != "" and (na(lastAlertBar) or bar_index > lastAlertBar or currentSignal != lastAlertType)
 
 alertMsg = signalText != "" ? signalText + " | TF: " + timeframe.period + " | " + syminfo.ticker : ""
 
 if sendAlerts and canAlertThisBar and alertMsg != ""
     alert(alertMsg, alert.freq_once_per_bar)
     lastAlertBar := bar_index
+    lastAlertType := currentSignal
