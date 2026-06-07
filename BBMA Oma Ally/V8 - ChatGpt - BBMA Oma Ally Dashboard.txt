@@ -1,0 +1,350 @@
+//@version=6
+indicator("BBMA OMA Ally Dashboard", overlay=true, max_labels_count=500)
+
+//====================================================
+// 1) Inputs
+//====================================================
+bbLen = input.int(20, "BB Period", minval=5)
+bbDev = input.float(2.0, "BB Deviation", minval=0.5, step=0.1)
+atrLen = input.int(14, "ATR Length", minval=5)
+
+useH1FilterTF = input.bool(false, "Use H1 Filter for TF / REENTRY")
+reentryLookbackBars = input.int(10, "REENTRY: Momentum lookback bars", minval=1)
+
+showBBMAPlots = input.bool(true, "Show BB/MA/EMA Lines")
+
+// CSA Settings
+enableCSA = input.bool(true, "Enable CSA Detection", group="CSA Settings")
+showCSASignals = input.bool(false, "Show CSA BUY / CSA SELL", group="CSA Settings")
+
+showReentrySignals = input.bool(true, "Show REENTRY BUY / REENTRY SELL")
+showExtremeSignals = input.bool(true, "Show EXTREME BUY / EXTREME SELL")
+showDashboard = input.bool(true, "Show Dashboard")
+showNowTag = input.bool(true, "Show NOW Tag On Chart")
+showDebug = input.bool(false, "Show debug marks")
+
+sendAlerts = input.bool(true, "Send alerts (Buy Now / Sell Now only)")
+
+//====================================================
+// 1.5) Global plots (BB/MA/EMA) - visual chart
+//====================================================
+midBB_plot = ta.sma(close, bbLen)
+dev_plot = bbDev * ta.stdev(close, bbLen)
+upper_plot = midBB_plot + dev_plot
+lower_plot = midBB_plot - dev_plot
+
+ema50_plot = ta.ema(close, 50)
+ma5H_plot = ta.wma(high, 5)
+ma10H_plot = ta.wma(high, 10)
+ma5L_plot = ta.wma(low, 5)
+ma10L_plot = ta.wma(low, 10)
+
+//====================================================
+// 2) Shared function: compute signals in current context TF
+// Return:
+// [newReentryBuy, newReentrySell, newExtremeBuy, newExtremeSell, lastSignalCode, csaBuyRaw, csaSellRaw]
+// lastSignalCode:
+//   2 = Reentry Buy
+//  -2 = Reentry Sell
+//   1 = Extreme Buy
+//  -1 = Extreme Sell
+//   0 = None
+//====================================================
+f_signal_engine() =>
+    // Core indicators
+    midBB = ta.sma(close, bbLen)
+    dev = bbDev * ta.stdev(close, bbLen)
+    upper = midBB + dev
+    lower = midBB - dev
+    ema50 = ta.ema(close, 50)
+    ma5H = ta.wma(high, 5)
+    ma10H = ta.wma(high, 10)
+    ma5L = ta.wma(low, 5)
+    ma10L = ta.wma(low, 10)
+
+    isBull = close > open
+    isBear = close < open
+    bodyHigh = math.max(open, close)
+    bodyLow = math.min(open, close)
+
+    // H1 filter (optional)
+    h1Close = request.security(syminfo.tickerid, "60", close)
+    h1EMA50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+    h1MidBB = request.security(syminfo.tickerid, "60", ta.sma(close, bbLen))
+    h1Bull = h1Close > h1EMA50 and h1Close > h1MidBB
+    h1Bear = h1Close < h1EMA50 and h1Close < h1MidBB
+    allowBuyTF = not useH1FilterTF or h1Bull
+    allowSellTF = not useH1FilterTF or h1Bear
+
+    // Momentum
+    tfMomBuy = allowBuyTF and close > upper and isBull
+    tfMomSell = allowSellTF and close < lower and isBear
+
+    //====================================================
+    // 9) CSA Detection
+    //====================================================
+    csaBuyRaw = enableCSA and isBull and close > ma5H and close > ma10H
+    csaSellRaw = enableCSA and isBear and close < ma5L and close < ma10L
+
+    // Direction memory
+    var string lastDirection = na
+    var int lastDirectionBar = na
+    var string lastCSADir = na
+    var int lastCSABar = na
+
+    csaLocked = not na(lastCSADir) and not na(lastCSABar) and (bar_index - lastCSABar) <= reentryLookbackBars
+
+    if tfMomBuy
+        if not (csaLocked and lastCSADir == "SELL")
+            lastDirection := "BUY"
+            lastDirectionBar := bar_index
+
+    if tfMomSell
+        if not (csaLocked and lastCSADir == "BUY")
+            lastDirection := "SELL"
+            lastDirectionBar := bar_index
+
+    if csaLocked
+        lastDirection := lastCSADir
+        lastDirectionBar := lastCSABar
+
+    if csaBuyRaw
+        lastDirection := "BUY"
+        lastDirectionBar := bar_index
+        lastCSADir := "BUY"
+        lastCSABar := bar_index
+
+    if csaSellRaw
+        lastDirection := "SELL"
+        lastDirectionBar := bar_index
+        lastCSADir := "SELL"
+        lastCSABar := bar_index
+
+    hasRecentSignal = not na(lastDirection) and (bar_index - lastDirectionBar) <= reentryLookbackBars
+    waitingForReentryBuy = hasRecentSignal and lastDirection == "BUY"
+    waitingForReentrySell = hasRecentSignal and lastDirection == "SELL"
+
+    // REENTRY: realtime (no bar close wait)
+    reentryBuyRaw = allowBuyTF and waitingForReentryBuy and low <= ma5L and low <= ma10L and not (csaLocked and lastCSADir == "SELL")
+    reentrySellRaw = allowSellTF and waitingForReentrySell and high >= ma5H and high >= ma10H and not (csaLocked and lastCSADir == "BUY")
+
+    reentryBuy = reentryBuyRaw
+    reentrySell = reentrySellRaw
+
+    newReentryBuy = reentryBuy and not reentryBuy[1]
+    newReentrySell = reentrySell and not reentrySell[1]
+
+    if newReentryBuy or newReentrySell
+        lastDirection := na
+        lastDirectionBar := na
+
+    if newReentryBuy and lastCSADir == "BUY"
+        lastCSADir := na
+        lastCSABar := na
+
+    if newReentrySell and lastCSADir == "SELL"
+        lastCSADir := na
+        lastCSABar := na
+
+    // EXTREME: wait bar close
+    recentMomBuy = ta.barssince(tfMomBuy) <= 10
+    recentMomSell = ta.barssince(tfMomSell) <= 10
+
+    ma5OutsideTop = ma5H > upper
+    ma5OutsideBottom = ma5L < lower
+
+    closeInsideBBForBuy = close >= lower and close <= upper
+    closeInsideBBForSell = close >= lower and close <= upper
+
+    wickTouchBottomBB = low <= lower and bodyLow >= lower and closeInsideBBForBuy
+    wickTouchTopBB = high >= upper and bodyHigh <= upper and closeInsideBBForSell
+
+    reversalBullish = isBull and low < low[1] and close > close[1]
+    reversalBearish = isBear and high > high[1] and close < close[1]
+
+    noRecentMomBuy = not recentMomBuy
+    noRecentMomSell = not recentMomSell
+
+    retestMA5Low = low <= ma5L and close >= ma5L
+    retestMA5High = high >= ma5H and close <= ma5H
+
+    extremeBuyStrict = ma5OutsideBottom and wickTouchBottomBB and reversalBullish and noRecentMomBuy and retestMA5Low
+    extremeSellStrict = ma5OutsideTop and wickTouchTopBB and reversalBearish and noRecentMomSell and retestMA5High
+
+    // relaxed fast path still kept
+    extremeBuyFast = wickTouchBottomBB
+    extremeSellFast = wickTouchTopBB
+
+    extremeBuyRaw = extremeBuyStrict or extremeBuyFast
+    extremeSellRaw = extremeSellStrict or extremeSellFast
+
+    extremeBuy = extremeBuyRaw and barstate.isconfirmed
+    extremeSell = extremeSellRaw and barstate.isconfirmed
+
+    newExtremeBuy = extremeBuy and not extremeBuy[1]
+    newExtremeSell = extremeSell and not extremeSell[1]
+
+    // Latest signal state
+    var int lastSig = 0
+    if newExtremeBuy
+        lastSig := 1
+    if newExtremeSell
+        lastSig := -1
+    if newReentryBuy
+        lastSig := 2
+    if newReentrySell
+        lastSig := -2
+
+    [newReentryBuy, newReentrySell, newExtremeBuy, newExtremeSell, lastSig, csaBuyRaw, csaSellRaw]
+
+//====================================================
+// 3) Current TF signals (for plotting)
+//====================================================
+[newReBuy, newReSell, newExBuy, newExSell, _stateCur, csaBuyCur, csaSellCur] = f_signal_engine()
+
+//====================================================
+// 4) Multi-TF states for dashboard
+//====================================================
+[_, _, _, _, stateH1, _, _] = request.security(syminfo.tickerid, "60", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateM30, _, _] = request.security(syminfo.tickerid, "30", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateM15, _, _] = request.security(syminfo.tickerid, "15", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateM5, _, _] = request.security(syminfo.tickerid, "5", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateM1, _, _] = request.security(syminfo.tickerid, "1", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+//====================================================
+// 5) NOW signal logic
+// Rule: Upper TF Reentry + immediate lower TF latest Extreme, same direction
+//====================================================
+buyNow =
+     (stateH1 == 2 and stateM30 == 1) or
+     (stateM30 == 2 and stateM15 == 1) or
+     (stateM15 == 2 and stateM5 == 1) or
+     (stateM5 == 2 and stateM1 == 1)
+
+sellNow =
+     (stateH1 == -2 and stateM30 == -1) or
+     (stateM30 == -2 and stateM15 == -1) or
+     (stateM15 == -2 and stateM5 == -1) or
+     (stateM5 == -2 and stateM1 == -1)
+
+// trigger source details
+buySource =
+     stateH1 == 2 and stateM30 == 1 ? "H1 Reentry + M30 Extreme" :
+     stateM30 == 2 and stateM15 == 1 ? "M30 Reentry + M15 Extreme" :
+     stateM15 == 2 and stateM5 == 1 ? "M15 Reentry + M5 Extreme" :
+     stateM5 == 2 and stateM1 == 1 ? "M5 Reentry + M1 Extreme" : "-"
+
+sellSource =
+     stateH1 == -2 and stateM30 == -1 ? "H1 Reentry + M30 Extreme" :
+     stateM30 == -2 and stateM15 == -1 ? "M30 Reentry + M15 Extreme" :
+     stateM15 == -2 and stateM5 == -1 ? "M15 Reentry + M5 Extreme" :
+     stateM5 == -2 and stateM1 == -1 ? "M5 Reentry + M1 Extreme" : "-"
+
+nowSource = buyNow ? buySource : sellNow ? sellSource : "-"
+
+buyNowTrigger = buyNow and not buyNow[1]
+sellNowTrigger = sellNow and not sellNow[1]
+
+//====================================================
+// 6) Helpers for dashboard
+//====================================================
+f_sigText(int s) =>
+    s == 2 ? "Reentry Buy" :
+     s == -2 ? "Reentry Sell" :
+     s == 1 ? "Extreme Buy" :
+     s == -1 ? "Extreme Sell" : "-"
+
+f_sigColor(int s) =>
+    s == 2 ? color.new(color.green, 0) :
+     s == -2 ? color.new(color.red, 0) :
+     s == 1 ? color.new(color.lime, 0) :
+     s == -1 ? color.new(color.orange, 0) : color.new(color.gray, 70)
+
+//====================================================
+// 7) Plots
+//====================================================
+plot(showBBMAPlots ? upper_plot : na, "BB Upper", color=color.new(color.black, 0))
+plot(showBBMAPlots ? midBB_plot : na, "BB Mid", color=color.new(color.gray, 0))
+plot(showBBMAPlots ? lower_plot : na, "BB Lower", color=color.new(color.black, 0))
+plot(showBBMAPlots ? ema50_plot : na, "EMA50", color=color.new(color.lime, 0))
+plot(showBBMAPlots ? ma5H_plot : na, "WMA5 High", color=color.new(color.blue, 0))
+plot(showBBMAPlots ? ma10H_plot : na, "WMA10 High", color=color.new(color.yellow, 0))
+plot(showBBMAPlots ? ma5L_plot : na, "WMA5 Low", color=color.new(color.fuchsia, 0))
+plot(showBBMAPlots ? ma10L_plot : na, "WMA10 Low", color=color.new(#e21f1f, 0))
+
+plotshape(showCSASignals and csaBuyCur, title="CSA BUY", style=shape.triangleup, location=location.belowbar, text="CSA BUY", textcolor=color.white, color=color.new(color.aqua, 0), size=size.small)
+plotshape(showCSASignals and csaSellCur, title="CSA SELL", style=shape.triangledown, location=location.abovebar, text="CSA SELL", textcolor=color.white, color=color.new(color.orange, 0), size=size.small)
+
+plotshape(showReentrySignals and newReBuy, title="REENTRY BUY", style=shape.labelup, location=location.belowbar, text="REENTRY BUY", textcolor=color.white, color=color.new(color.green, 0), size=size.small)
+plotshape(showReentrySignals and newReSell, title="REENTRY SELL", style=shape.labeldown, location=location.abovebar, text="REENTRY SELL", textcolor=color.white, color=color.new(color.red, 0), size=size.small)
+
+plotshape(showExtremeSignals and newExBuy, title="EXTREME BUY", style=shape.labelup, location=location.belowbar, text="EXTREME BUY", textcolor=color.white, color=color.new(color.lime, 0), size=size.small)
+plotshape(showExtremeSignals and newExSell, title="EXTREME SELL", style=shape.labeldown, location=location.abovebar, text="EXTREME SELL", textcolor=color.white, color=color.new(color.orange, 0), size=size.small)
+
+plotshape(showDebug and buyNow, title="BUY NOW DEBUG", style=shape.circle, location=location.belowbar, text="BUY NOW", textcolor=color.white, color=color.new(color.green, 65), size=size.tiny)
+plotshape(showDebug and sellNow, title="SELL NOW DEBUG", style=shape.circle, location=location.abovebar, text="SELL NOW", textcolor=color.white, color=color.new(color.red, 65), size=size.tiny)
+
+// Compact NOW tag on chart
+var label nowTag = na
+if barstate.islast
+    label.delete(nowTag)
+    if showNowTag and (buyNow or sellNow)
+        tagText = buyNow ? "BUY NOW" : "SELL NOW"
+        tagColor = buyNow ? color.new(color.green, 0) : color.new(color.red, 0)
+        tagStyle = buyNow ? label.style_label_up : label.style_label_down
+        tagY = buyNow ? low : high
+        nowTag := label.new(bar_index, tagY, tagText, style=tagStyle, color=tagColor, textcolor=color.white)
+
+//====================================================
+// 8) Dashboard table
+//====================================================
+var table dash = table.new(position.top_right, 3, 8, border_width=1)
+
+if barstate.islast and showDashboard
+    table.cell(dash, 0, 0, "TF", bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(dash, 1, 0, "Latest Signal", bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(dash, 2, 0, "Dir", bgcolor=color.new(color.black, 0), text_color=color.white)
+
+    table.cell(dash, 0, 1, "H1")
+    table.cell(dash, 1, 1, f_sigText(stateH1), bgcolor=f_sigColor(stateH1), text_color=color.white)
+    table.cell(dash, 2, 1, stateH1 > 0 ? "BUY" : stateH1 < 0 ? "SELL" : "-")
+
+    table.cell(dash, 0, 2, "M30")
+    table.cell(dash, 1, 2, f_sigText(stateM30), bgcolor=f_sigColor(stateM30), text_color=color.white)
+    table.cell(dash, 2, 2, stateM30 > 0 ? "BUY" : stateM30 < 0 ? "SELL" : "-")
+
+    table.cell(dash, 0, 3, "M15")
+    table.cell(dash, 1, 3, f_sigText(stateM15), bgcolor=f_sigColor(stateM15), text_color=color.white)
+    table.cell(dash, 2, 3, stateM15 > 0 ? "BUY" : stateM15 < 0 ? "SELL" : "-")
+
+    table.cell(dash, 0, 4, "M5")
+    table.cell(dash, 1, 4, f_sigText(stateM5), bgcolor=f_sigColor(stateM5), text_color=color.white)
+    table.cell(dash, 2, 4, stateM5 > 0 ? "BUY" : stateM5 < 0 ? "SELL" : "-")
+
+    table.cell(dash, 0, 5, "M1")
+    table.cell(dash, 1, 5, f_sigText(stateM1), bgcolor=f_sigColor(stateM1), text_color=color.white)
+    table.cell(dash, 2, 5, stateM1 > 0 ? "BUY" : stateM1 < 0 ? "SELL" : "-")
+
+    nowText = buyNow ? "BUY NOW" : sellNow ? "SELL NOW" : "-"
+    nowBg = buyNow ? color.new(color.green, 0) : sellNow ? color.new(color.red, 0) : color.new(color.gray, 70)
+
+    table.cell(dash, 0, 6, "NOW", bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(dash, 1, 6, nowText, bgcolor=nowBg, text_color=color.white)
+    table.cell(dash, 2, 6, buyNow ? "BUY" : sellNow ? "SELL" : "-")
+
+    srcBg = buyNow ? color.new(color.green, 70) : sellNow ? color.new(color.red, 70) : color.new(color.navy, 55)
+    table.cell(dash, 0, 7, "SOURCE", bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(dash, 1, 7, nowSource, bgcolor=srcBg, text_color=color.white)
+    table.cell(dash, 2, 7, "-", bgcolor=srcBg, text_color=color.white)
+
+//====================================================
+// 9) Alerts (ONLY Buy Now / Sell Now)
+//====================================================
+if sendAlerts and buyNowTrigger
+    alert("BUY NOW | " + syminfo.ticker + " | TF: " + timeframe.period + " | " + nowSource, alert.freq_once_per_bar)
+
+if sendAlerts and sellNowTrigger
+    alert("SELL NOW | " + syminfo.ticker + " | TF: " + timeframe.period + " | " + nowSource, alert.freq_once_per_bar)
+
+alertcondition(buyNowTrigger, title="BUY NOW", message="BUY NOW | {{ticker}} | TF: {{interval}}")
+alertcondition(sellNowTrigger, title="SELL NOW", message="SELL NOW | {{ticker}} | TF: {{interval}}")
