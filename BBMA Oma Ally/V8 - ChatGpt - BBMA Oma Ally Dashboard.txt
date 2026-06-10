@@ -7,6 +7,8 @@ indicator("BBMA OMA Ally Dashboard", overlay=true, max_labels_count=500)
 bbLen = input.int(20, "BB Period", minval=5)
 bbDev = input.float(2.0, "BB Deviation", minval=0.5, step=0.1)
 atrLen = input.int(14, "ATR Length", minval=5)
+bbFlatLookback = input.int(5, "EXTREME: BB Flat Lookback", minval=1)
+bbFlatAtrMult = input.float(0.15, "EXTREME: BB Flat ATR Multiplier", minval=0.01, step=0.01)
 
 useH1FilterTF = input.bool(false, "Use H1 Filter for TF / REENTRY")
 reentryLookbackBars = input.int(10, "REENTRY: Momentum lookback bars", minval=1)
@@ -15,7 +17,7 @@ showBBMAPlots = input.bool(true, "Show BB/MA/EMA Lines")
 
 // CSA Settings
 enableCSA = input.bool(true, "Enable CSA Detection", group="CSA Settings")
-showCSASignals = input.bool(false, "Show CSA BUY / CSA SELL", group="CSA Settings")
+showCSASignals = input.bool(true, "Show CSA BUY / CSA SELL", group="CSA Settings")
 
 showReentrySignals = input.bool(true, "Show REENTRY BUY / REENTRY SELL")
 showExtremeSignals = input.bool(true, "Show EXTREME BUY / EXTREME SELL")
@@ -42,7 +44,7 @@ ma10L_plot = ta.wma(low, 10)
 //====================================================
 // 2) Shared function: compute signals in current context TF
 // Return:
-// [newReentryBuy, newReentrySell, newExtremeBuy, newExtremeSell, lastSignalCode, csaBuyRaw, csaSellRaw]
+// [newReentryBuy, newReentrySell, newExtremeBuy, newExtremeSell, lastSignalCode, csaBuyRaw, csaSellRaw, lastReDir, lastReTime, lastExDir, lastExTime]
 // lastSignalCode:
 //   2 = Reentry Buy
 //  -2 = Reentry Sell
@@ -81,7 +83,7 @@ f_signal_engine() =>
     tfMomSell = allowSellTF and close < lower and isBear
 
     //====================================================
-    // 9) CSA Detection
+    // CSA Detection
     //====================================================
     csaBuyRaw = enableCSA and isBull and close > ma5H and close > ma10H
     csaSellRaw = enableCSA and isBear and close < ma5L and close < ma10L
@@ -146,7 +148,7 @@ f_signal_engine() =>
         lastCSADir := na
         lastCSABar := na
 
-    // EXTREME: wait bar close
+    // EXTREME: realtime (no bar close wait), only when BB is flat
     recentMomBuy = ta.barssince(tfMomBuy) <= 10
     recentMomSell = ta.barssince(tfMomSell) <= 10
 
@@ -175,11 +177,19 @@ f_signal_engine() =>
     extremeBuyFast = wickTouchBottomBB
     extremeSellFast = wickTouchTopBB
 
-    extremeBuyRaw = extremeBuyStrict or extremeBuyFast
-    extremeSellRaw = extremeSellStrict or extremeSellFast
+    // BB flat filter
+    atrNow = ta.atr(atrLen)
+    bbSlopeMid = math.abs(midBB - midBB[bbFlatLookback])
+    bbSlopeUpper = math.abs(upper - upper[bbFlatLookback])
+    bbSlopeLower = math.abs(lower - lower[bbFlatLookback])
+    bbFlatThreshold = atrNow * bbFlatAtrMult
+    bbIsFlat = bbSlopeMid <= bbFlatThreshold and bbSlopeUpper <= bbFlatThreshold and bbSlopeLower <= bbFlatThreshold
 
-    extremeBuy = extremeBuyRaw and barstate.isconfirmed
-    extremeSell = extremeSellRaw and barstate.isconfirmed
+    extremeBuyRaw = (extremeBuyStrict or extremeBuyFast) and bbIsFlat
+    extremeSellRaw = (extremeSellStrict or extremeSellFast) and bbIsFlat
+
+    extremeBuy = extremeBuyRaw
+    extremeSell = extremeSellRaw
 
     newExtremeBuy = extremeBuy and not extremeBuy[1]
     newExtremeSell = extremeSell and not extremeSell[1]
@@ -195,51 +205,197 @@ f_signal_engine() =>
     if newReentrySell
         lastSig := -2
 
-    [newReentryBuy, newReentrySell, newExtremeBuy, newExtremeSell, lastSig, csaBuyRaw, csaSellRaw]
+    // Track latest Reentry/Extreme event time+direction
+    var int lastReDir = 0
+    var int lastReTime = na
+    var int lastExDir = 0
+    var int lastExTime = na
+
+    if newReentryBuy
+        lastReDir := 1
+        lastReTime := time
+    if newReentrySell
+        lastReDir := -1
+        lastReTime := time
+
+    if newExtremeBuy
+        lastExDir := 1
+        lastExTime := time
+    if newExtremeSell
+        lastExDir := -1
+        lastExTime := time
+
+    [newReentryBuy, newReentrySell, newExtremeBuy, newExtremeSell, lastSig, csaBuyRaw, csaSellRaw, lastReDir, lastReTime, lastExDir, lastExTime]
 
 //====================================================
 // 3) Current TF signals (for plotting)
 //====================================================
-[newReBuy, newReSell, newExBuy, newExSell, _stateCur, csaBuyCur, csaSellCur] = f_signal_engine()
+[newReBuy, newReSell, newExBuy, newExSell, _stateCur, csaBuyCur, csaSellCur, _reDirCur, _reTimeCur, _exDirCur, _exTimeCur] = f_signal_engine()
 
 //====================================================
 // 4) Multi-TF states for dashboard
 //====================================================
-[_, _, _, _, stateH1, _, _] = request.security(syminfo.tickerid, "60", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
-[_, _, _, _, stateM30, _, _] = request.security(syminfo.tickerid, "30", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
-[_, _, _, _, stateM15, _, _] = request.security(syminfo.tickerid, "15", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
-[_, _, _, _, stateM5, _, _] = request.security(syminfo.tickerid, "5", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
-[_, _, _, _, stateM1, _, _] = request.security(syminfo.tickerid, "1", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateD1, _, _, reDirD1, reTimeD1, exDirD1, exTimeD1] = request.security(syminfo.tickerid, "D", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateH4, _, _, reDirH4, reTimeH4, exDirH4, exTimeH4] = request.security(syminfo.tickerid, "240", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateH1, _, _, reDirH1, reTimeH1, exDirH1, exTimeH1] = request.security(syminfo.tickerid, "60", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateM30, _, _, reDirM30, reTimeM30, exDirM30, exTimeM30] = request.security(syminfo.tickerid, "30", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateM15, _, _, reDirM15, reTimeM15, exDirM15, exTimeM15] = request.security(syminfo.tickerid, "15", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateM5, _, _, reDirM5, reTimeM5, exDirM5, exTimeM5] = request.security(syminfo.tickerid, "5", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+[_, _, _, _, stateM1, _, _, reDirM1, reTimeM1, exDirM1, exTimeM1] = request.security(syminfo.tickerid, "1", f_signal_engine(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
 
 //====================================================
-// 5) NOW signal logic
-// Rule: Upper TF Reentry + immediate lower TF latest Extreme, same direction
+// 5) NOW signal logic (LATEST EVENT BASED)
+// - Pick latest Reentry from: D1, H4, H1, M30, M15, M5
+// - Reentry TF must currently be Reentry (state == 2 or -2)
+// - Then pick latest Extreme from lower TFs of selected Reentry TF
+// - Must be same direction AND Extreme time >= Reentry time
 //====================================================
-buyNow =
-     (stateH1 == 2 and stateM30 == 1) or
-     (stateM30 == 2 and stateM15 == 1) or
-     (stateM15 == 2 and stateM5 == 1) or
-     (stateM5 == 2 and stateM1 == 1)
+isReD1 = stateD1 == 2 or stateD1 == -2
+isReH4 = stateH4 == 2 or stateH4 == -2
+isReH1 = stateH1 == 2 or stateH1 == -2
+isReM30 = stateM30 == 2 or stateM30 == -2
+isReM15 = stateM15 == 2 or stateM15 == -2
+isReM5 = stateM5 == 2 or stateM5 == -2
 
-sellNow =
-     (stateH1 == -2 and stateM30 == -1) or
-     (stateM30 == -2 and stateM15 == -1) or
-     (stateM15 == -2 and stateM5 == -1) or
-     (stateM5 == -2 and stateM1 == -1)
+int selReDir = 0
+int selReTime = na
+string selReTf = ""
 
-// trigger source details
-buySource =
-     stateH1 == 2 and stateM30 == 1 ? "H1 Reentry + M30 Extreme" :
-     stateM30 == 2 and stateM15 == 1 ? "M30 Reentry + M15 Extreme" :
-     stateM15 == 2 and stateM5 == 1 ? "M15 Reentry + M5 Extreme" :
-     stateM5 == 2 and stateM1 == 1 ? "M5 Reentry + M1 Extreme" : "-"
+if isReD1 and not na(reTimeD1) and (na(selReTime) or reTimeD1 > selReTime)
+    selReDir := reDirD1
+    selReTime := reTimeD1
+    selReTf := "D1"
 
-sellSource =
-     stateH1 == -2 and stateM30 == -1 ? "H1 Reentry + M30 Extreme" :
-     stateM30 == -2 and stateM15 == -1 ? "M30 Reentry + M15 Extreme" :
-     stateM15 == -2 and stateM5 == -1 ? "M15 Reentry + M5 Extreme" :
-     stateM5 == -2 and stateM1 == -1 ? "M5 Reentry + M1 Extreme" : "-"
+if isReH4 and not na(reTimeH4) and (na(selReTime) or reTimeH4 > selReTime)
+    selReDir := reDirH4
+    selReTime := reTimeH4
+    selReTf := "H4"
 
+if isReH1 and not na(reTimeH1) and (na(selReTime) or reTimeH1 > selReTime)
+    selReDir := reDirH1
+    selReTime := reTimeH1
+    selReTf := "H1"
+
+if isReM30 and not na(reTimeM30) and (na(selReTime) or reTimeM30 > selReTime)
+    selReDir := reDirM30
+    selReTime := reTimeM30
+    selReTf := "M30"
+
+if isReM15 and not na(reTimeM15) and (na(selReTime) or reTimeM15 > selReTime)
+    selReDir := reDirM15
+    selReTime := reTimeM15
+    selReTf := "M15"
+
+if isReM5 and not na(reTimeM5) and (na(selReTime) or reTimeM5 > selReTime)
+    selReDir := reDirM5
+    selReTime := reTimeM5
+    selReTf := "M5"
+
+int selExDir = 0
+int selExTime = na
+string selExTf = ""
+
+if selReTf == "D1"
+    if not na(exTimeH4) and exDirH4 == selReDir and exTimeH4 >= selReTime and (na(selExTime) or exTimeH4 > selExTime)
+        selExDir := exDirH4
+        selExTime := exTimeH4
+        selExTf := "H4"
+    if not na(exTimeH1) and exDirH1 == selReDir and exTimeH1 >= selReTime and (na(selExTime) or exTimeH1 > selExTime)
+        selExDir := exDirH1
+        selExTime := exTimeH1
+        selExTf := "H1"
+    if not na(exTimeM30) and exDirM30 == selReDir and exTimeM30 >= selReTime and (na(selExTime) or exTimeM30 > selExTime)
+        selExDir := exDirM30
+        selExTime := exTimeM30
+        selExTf := "M30"
+    if not na(exTimeM15) and exDirM15 == selReDir and exTimeM15 >= selReTime and (na(selExTime) or exTimeM15 > selExTime)
+        selExDir := exDirM15
+        selExTime := exTimeM15
+        selExTf := "M15"
+    if not na(exTimeM5) and exDirM5 == selReDir and exTimeM5 >= selReTime and (na(selExTime) or exTimeM5 > selExTime)
+        selExDir := exDirM5
+        selExTime := exTimeM5
+        selExTf := "M5"
+    if not na(exTimeM1) and exDirM1 == selReDir and exTimeM1 >= selReTime and (na(selExTime) or exTimeM1 > selExTime)
+        selExDir := exDirM1
+        selExTime := exTimeM1
+        selExTf := "M1"
+
+if selReTf == "H4"
+    if not na(exTimeH1) and exDirH1 == selReDir and exTimeH1 >= selReTime and (na(selExTime) or exTimeH1 > selExTime)
+        selExDir := exDirH1
+        selExTime := exTimeH1
+        selExTf := "H1"
+    if not na(exTimeM30) and exDirM30 == selReDir and exTimeM30 >= selReTime and (na(selExTime) or exTimeM30 > selExTime)
+        selExDir := exDirM30
+        selExTime := exTimeM30
+        selExTf := "M30"
+    if not na(exTimeM15) and exDirM15 == selReDir and exTimeM15 >= selReTime and (na(selExTime) or exTimeM15 > selExTime)
+        selExDir := exDirM15
+        selExTime := exTimeM15
+        selExTf := "M15"
+    if not na(exTimeM5) and exDirM5 == selReDir and exTimeM5 >= selReTime and (na(selExTime) or exTimeM5 > selExTime)
+        selExDir := exDirM5
+        selExTime := exTimeM5
+        selExTf := "M5"
+    if not na(exTimeM1) and exDirM1 == selReDir and exTimeM1 >= selReTime and (na(selExTime) or exTimeM1 > selExTime)
+        selExDir := exDirM1
+        selExTime := exTimeM1
+        selExTf := "M1"
+
+if selReTf == "H1"
+    if not na(exTimeM30) and exDirM30 == selReDir and exTimeM30 >= selReTime and (na(selExTime) or exTimeM30 > selExTime)
+        selExDir := exDirM30
+        selExTime := exTimeM30
+        selExTf := "M30"
+    if not na(exTimeM15) and exDirM15 == selReDir and exTimeM15 >= selReTime and (na(selExTime) or exTimeM15 > selExTime)
+        selExDir := exDirM15
+        selExTime := exTimeM15
+        selExTf := "M15"
+    if not na(exTimeM5) and exDirM5 == selReDir and exTimeM5 >= selReTime and (na(selExTime) or exTimeM5 > selExTime)
+        selExDir := exDirM5
+        selExTime := exTimeM5
+        selExTf := "M5"
+    if not na(exTimeM1) and exDirM1 == selReDir and exTimeM1 >= selReTime and (na(selExTime) or exTimeM1 > selExTime)
+        selExDir := exDirM1
+        selExTime := exTimeM1
+        selExTf := "M1"
+
+if selReTf == "M30"
+    if not na(exTimeM15) and exDirM15 == selReDir and exTimeM15 >= selReTime and (na(selExTime) or exTimeM15 > selExTime)
+        selExDir := exDirM15
+        selExTime := exTimeM15
+        selExTf := "M15"
+    if not na(exTimeM5) and exDirM5 == selReDir and exTimeM5 >= selReTime and (na(selExTime) or exTimeM5 > selExTime)
+        selExDir := exDirM5
+        selExTime := exTimeM5
+        selExTf := "M5"
+    if not na(exTimeM1) and exDirM1 == selReDir and exTimeM1 >= selReTime and (na(selExTime) or exTimeM1 > selExTime)
+        selExDir := exDirM1
+        selExTime := exTimeM1
+        selExTf := "M1"
+
+if selReTf == "M15"
+    if not na(exTimeM5) and exDirM5 == selReDir and exTimeM5 >= selReTime and (na(selExTime) or exTimeM5 > selExTime)
+        selExDir := exDirM5
+        selExTime := exTimeM5
+        selExTf := "M5"
+    if not na(exTimeM1) and exDirM1 == selReDir and exTimeM1 >= selReTime and (na(selExTime) or exTimeM1 > selExTime)
+        selExDir := exDirM1
+        selExTime := exTimeM1
+        selExTf := "M1"
+
+if selReTf == "M5"
+    if not na(exTimeM1) and exDirM1 == selReDir and exTimeM1 >= selReTime and (na(selExTime) or exTimeM1 > selExTime)
+        selExDir := exDirM1
+        selExTime := exTimeM1
+        selExTf := "M1"
+
+buyNow = selReDir == 1 and selExDir == 1 and not na(selReTime) and not na(selExTime)
+sellNow = selReDir == -1 and selExDir == -1 and not na(selReTime) and not na(selExTime)
+
+buySource = buyNow ? (selReTf + " Reentry + " + selExTf + " Extreme") : "-"
+sellSource = sellNow ? (selReTf + " Reentry + " + selExTf + " Extreme") : "-"
 nowSource = buyNow ? buySource : sellNow ? sellSource : "-"
 
 buyNowTrigger = buyNow and not buyNow[1]
@@ -275,11 +431,11 @@ plot(showBBMAPlots ? ma10L_plot : na, "WMA10 Low", color=color.new(#e21f1f, 0))
 plotshape(showCSASignals and csaBuyCur, title="CSA BUY", style=shape.triangleup, location=location.belowbar, text="CSA BUY", textcolor=color.white, color=color.new(color.aqua, 0), size=size.small)
 plotshape(showCSASignals and csaSellCur, title="CSA SELL", style=shape.triangledown, location=location.abovebar, text="CSA SELL", textcolor=color.white, color=color.new(color.orange, 0), size=size.small)
 
-plotshape(showReentrySignals and newReBuy, title="REENTRY BUY", style=shape.labelup, location=location.belowbar, text="REENTRY BUY", textcolor=color.white, color=color.new(color.green, 0), size=size.small)
-plotshape(showReentrySignals and newReSell, title="REENTRY SELL", style=shape.labeldown, location=location.abovebar, text="REENTRY SELL", textcolor=color.white, color=color.new(color.red, 0), size=size.small)
+plotshape(showReentrySignals and newReBuy, title="REENTRY BUY", style=shape.labelup, location=location.belowbar, text="REENTRY BUY", textcolor=color.white, color=color.new(#4caf4f, 49), size=size.small)
+plotshape(showReentrySignals and newReSell, title="REENTRY SELL", style=shape.labeldown, location=location.abovebar, text="REENTRY SELL", textcolor=color.white, color=color.new(#ff5252, 58), size=size.small)
 
-plotshape(showExtremeSignals and newExBuy, title="EXTREME BUY", style=shape.labelup, location=location.belowbar, text="EXTREME BUY", textcolor=color.white, color=color.new(color.lime, 0), size=size.small)
-plotshape(showExtremeSignals and newExSell, title="EXTREME SELL", style=shape.labeldown, location=location.abovebar, text="EXTREME SELL", textcolor=color.white, color=color.new(color.orange, 0), size=size.small)
+plotshape(showExtremeSignals and newExBuy, title="EXTREME BUY", style=shape.labelup, location=location.belowbar, text="EXTREME BUY", textcolor=color.white, color=color.new(#00e677, 54), size=size.small)
+plotshape(showExtremeSignals and newExSell, title="EXTREME SELL", style=shape.labeldown, location=location.abovebar, text="EXTREME SELL", textcolor=color.white, color=color.new(#ff9900, 57), size=size.small)
 
 plotshape(showDebug and buyNow, title="BUY NOW DEBUG", style=shape.circle, location=location.belowbar, text="BUY NOW", textcolor=color.white, color=color.new(color.green, 65), size=size.tiny)
 plotshape(showDebug and sellNow, title="SELL NOW DEBUG", style=shape.circle, location=location.abovebar, text="SELL NOW", textcolor=color.white, color=color.new(color.red, 65), size=size.tiny)
@@ -290,7 +446,7 @@ if barstate.islast
     label.delete(nowTag)
     if showNowTag and (buyNow or sellNow)
         tagText = buyNow ? "BUY NOW" : "SELL NOW"
-        tagColor = buyNow ? color.new(color.green, 0) : color.new(color.red, 0)
+        tagColor = buyNow ? color.new(#4caf4f, 65) : color.new(#ff5252, 66)
         tagStyle = buyNow ? label.style_label_up : label.style_label_down
         tagY = buyNow ? low : high
         nowTag := label.new(bar_index, tagY, tagText, style=tagStyle, color=tagColor, textcolor=color.white)
@@ -298,44 +454,52 @@ if barstate.islast
 //====================================================
 // 8) Dashboard table
 //====================================================
-var table dash = table.new(position.top_right, 3, 8, border_width=1)
+var table dash = table.new(position.top_right, 3, 10, border_width=1)
 
 if barstate.islast and showDashboard
     table.cell(dash, 0, 0, "TF", bgcolor=color.new(color.black, 0), text_color=color.white)
     table.cell(dash, 1, 0, "Latest Signal", bgcolor=color.new(color.black, 0), text_color=color.white)
     table.cell(dash, 2, 0, "Dir", bgcolor=color.new(color.black, 0), text_color=color.white)
 
-    table.cell(dash, 0, 1, "H1")
-    table.cell(dash, 1, 1, f_sigText(stateH1), bgcolor=f_sigColor(stateH1), text_color=color.white)
-    table.cell(dash, 2, 1, stateH1 > 0 ? "BUY" : stateH1 < 0 ? "SELL" : "-")
+    table.cell(dash, 0, 1, "D1")
+    table.cell(dash, 1, 1, f_sigText(stateD1), bgcolor=f_sigColor(stateD1), text_color=color.white)
+    table.cell(dash, 2, 1, stateD1 > 0 ? "BUY" : stateD1 < 0 ? "SELL" : "-")
 
-    table.cell(dash, 0, 2, "M30")
-    table.cell(dash, 1, 2, f_sigText(stateM30), bgcolor=f_sigColor(stateM30), text_color=color.white)
-    table.cell(dash, 2, 2, stateM30 > 0 ? "BUY" : stateM30 < 0 ? "SELL" : "-")
+    table.cell(dash, 0, 2, "H4")
+    table.cell(dash, 1, 2, f_sigText(stateH4), bgcolor=f_sigColor(stateH4), text_color=color.white)
+    table.cell(dash, 2, 2, stateH4 > 0 ? "BUY" : stateH4 < 0 ? "SELL" : "-")
 
-    table.cell(dash, 0, 3, "M15")
-    table.cell(dash, 1, 3, f_sigText(stateM15), bgcolor=f_sigColor(stateM15), text_color=color.white)
-    table.cell(dash, 2, 3, stateM15 > 0 ? "BUY" : stateM15 < 0 ? "SELL" : "-")
+    table.cell(dash, 0, 3, "H1")
+    table.cell(dash, 1, 3, f_sigText(stateH1), bgcolor=f_sigColor(stateH1), text_color=color.white)
+    table.cell(dash, 2, 3, stateH1 > 0 ? "BUY" : stateH1 < 0 ? "SELL" : "-")
 
-    table.cell(dash, 0, 4, "M5")
-    table.cell(dash, 1, 4, f_sigText(stateM5), bgcolor=f_sigColor(stateM5), text_color=color.white)
-    table.cell(dash, 2, 4, stateM5 > 0 ? "BUY" : stateM5 < 0 ? "SELL" : "-")
+    table.cell(dash, 0, 4, "M30")
+    table.cell(dash, 1, 4, f_sigText(stateM30), bgcolor=f_sigColor(stateM30), text_color=color.white)
+    table.cell(dash, 2, 4, stateM30 > 0 ? "BUY" : stateM30 < 0 ? "SELL" : "-")
 
-    table.cell(dash, 0, 5, "M1")
-    table.cell(dash, 1, 5, f_sigText(stateM1), bgcolor=f_sigColor(stateM1), text_color=color.white)
-    table.cell(dash, 2, 5, stateM1 > 0 ? "BUY" : stateM1 < 0 ? "SELL" : "-")
+    table.cell(dash, 0, 5, "M15")
+    table.cell(dash, 1, 5, f_sigText(stateM15), bgcolor=f_sigColor(stateM15), text_color=color.white)
+    table.cell(dash, 2, 5, stateM15 > 0 ? "BUY" : stateM15 < 0 ? "SELL" : "-")
+
+    table.cell(dash, 0, 6, "M5")
+    table.cell(dash, 1, 6, f_sigText(stateM5), bgcolor=f_sigColor(stateM5), text_color=color.white)
+    table.cell(dash, 2, 6, stateM5 > 0 ? "BUY" : stateM5 < 0 ? "SELL" : "-")
+
+    table.cell(dash, 0, 7, "M1")
+    table.cell(dash, 1, 7, f_sigText(stateM1), bgcolor=f_sigColor(stateM1), text_color=color.white)
+    table.cell(dash, 2, 7, stateM1 > 0 ? "BUY" : stateM1 < 0 ? "SELL" : "-")
 
     nowText = buyNow ? "BUY NOW" : sellNow ? "SELL NOW" : "-"
     nowBg = buyNow ? color.new(color.green, 0) : sellNow ? color.new(color.red, 0) : color.new(color.gray, 70)
 
-    table.cell(dash, 0, 6, "NOW", bgcolor=color.new(color.black, 0), text_color=color.white)
-    table.cell(dash, 1, 6, nowText, bgcolor=nowBg, text_color=color.white)
-    table.cell(dash, 2, 6, buyNow ? "BUY" : sellNow ? "SELL" : "-")
+    table.cell(dash, 0, 8, "NOW", bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(dash, 1, 8, nowText, bgcolor=nowBg, text_color=color.white)
+    table.cell(dash, 2, 8, buyNow ? "BUY" : sellNow ? "SELL" : "-")
 
     srcBg = buyNow ? color.new(color.green, 70) : sellNow ? color.new(color.red, 70) : color.new(color.navy, 55)
-    table.cell(dash, 0, 7, "SOURCE", bgcolor=color.new(color.black, 0), text_color=color.white)
-    table.cell(dash, 1, 7, nowSource, bgcolor=srcBg, text_color=color.white)
-    table.cell(dash, 2, 7, "-", bgcolor=srcBg, text_color=color.white)
+    table.cell(dash, 0, 9, "SOURCE", bgcolor=color.new(color.black, 0), text_color=color.white)
+    table.cell(dash, 1, 9, nowSource, bgcolor=srcBg, text_color=color.white)
+    table.cell(dash, 2, 9, "-", bgcolor=srcBg, text_color=color.white)
 
 //====================================================
 // 9) Alerts (ONLY Buy Now / Sell Now)
